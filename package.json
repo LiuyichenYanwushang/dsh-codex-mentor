@@ -1,0 +1,12 @@
+{
+  "name": "dsh-codex-mentor",
+  "version": "0.4.1",
+  "description": "Codex Mentor: GPT guidance, fixed DeepSeek Flash workers, and replayable task memory for DSH.",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./index.js", "./compaction": "./compaction.js", "./capability-guard": "./capability-guard.js", "./package.json": "./package.json" },
+  "files": ["*.js", "cordis.patch.yml", "README.md"],
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "peerDependencies": { "@deepseek-ai/dsh": "0.2.0-rc.2", "dsh-codex-connect": "^0.2.0-alpha.1" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}

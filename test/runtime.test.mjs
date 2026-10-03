@@ -1,0 +1,184 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createRequire, registerHooks } from 'node:module';
+import { dirname, resolve } from 'node:path';
+const runtime = createRequire(resolve(process.env.DSH_RUNTIME_DIR ?? resolve(dirname(process.execPath), '../lib/node_modules/@deepseek-ai/dsh'), 'package.json'));
+registerHooks({ resolve(specifier, context, next) { return next((specifier.startsWith('@deepseek-ai/') || specifier === 'zod') ? runtime.resolve(specifier) : specifier, context); } });
+const { Context } = await import('@deepseek-ai/cordis');
+const mentor = await import('../index.js');
+const { LlmAdapter, createUserMessage } = await import('@deepseek-ai/dsh-llm');
+const { KEY, fold, initial, view } = await import('../ledger.js');
+const { cooperation, summaryText } = await import('../experience.js');
+const { readFile, mkdtemp, rm } = await import('node:fs/promises');
+const { tmpdir } = await import('node:os');
+const { join, basename } = await import('node:path');
+const { fileURLToPath } = await import('node:url');
+const { randomUUID } = await import('node:crypto');
+const fixture = fileURLToPath(new URL('./fixtures/contract.txt', import.meta.url));
+const stateOf = (ctx, agent) => ctx.sessionProjections.stateOf(agent.session, KEY);
+
+async function* response(name, args) {
+  const block = name ? { type: 'tool-call', id: randomUUID(), name, arguments: JSON.stringify(args) } : { type: 'text', text: args };
+  yield { type: 'block-start', index: 0, blockType: block.type };
+  if (name) yield { type: 'tool-call-delta', index: 0, id: block.id, name, argumentsDelta: block.arguments };
+  else yield { type: 'text-delta', index: 0, text: args };
+  yield { type: 'block-end', index: 0, block };
+  yield { type: 'finish', reason: { kind: name ? 'tool-calls' : 'stop' } };
+}
+
+function until(ctx, agent, predicate, action) {
+  let off;
+  const promise = new Promise((resolve, reject) => {
+    off = ctx.on('session/event', (session, event) => {
+      if (event.type === 'tool/result' && event.data.message.isError) reject(new Error(JSON.stringify(event.data.message.content)));
+      if (event.type === 'turn/end' && event.data.reason?.kind === 'error') reject(new Error(JSON.stringify(event.data)));
+      if (session.id === agent.id && predicate(stateOf(ctx, agent))) resolve();
+    });
+    Promise.resolve().then(action).catch(reject);
+  });
+  return promise.finally(() => off());
+}
+
+class ScriptedAdapter extends LlmAdapter {
+  constructor(ctx) { super(); this.ctx = ctx; this.steps = new Map(); this.calls = []; }
+  async listModels(provider) { return [{ provider, id: provider === 'openai-codex' ? 'gpt-6.1-sol' : 'deepseek-flash', name: 'Scripted test model' }]; }
+  async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 1000000 } }; }
+  stream(options) {
+    this.calls.push({ provider: options.provider, model: options.model, sessionId: options.sessionId });
+    const agent = this.ctx.agents.get(options.sessionId), state = stateOf(this.ctx, agent);
+    const step = this.steps.get(agent.id) ?? 0; this.steps.set(agent.id, step + 1);
+    if (step > 20) throw new Error('Scripted turn exceeded bound: ' + JSON.stringify({ agent: agent.id, state, messages: options.messages.slice(-3) }).slice(0, 12000));
+    const names = options.tools.map(tool => tool.name);
+    assert.ok(!names.includes('spawn_teammate'));
+    if (agent.session.header.origin === 'subagent') {
+      assert.ok(names.includes('mentor_report')); assert.ok(!names.includes('mentor_delegate'));
+      const task = state.tasks[0]; assert.ok(task, 'assignment admitted before worker model call');
+      if (step === 0) return response('read', { file_path: fixture });
+      if (task.goal.endsWith('A') && !task.guidance) return response('mentor_report', { task_id: task.taskId, status: 'blocked', summary: 'Need contract decision', evidence: 'Read fixture AC1 and AC2', attempts: 'Inspected fixture; invalid-input behavior remains unspecified for this scenario', question: 'Should invalid input be rejected?' });
+      return response('mentor_report', { task_id: task.taskId, status: 'ready-review', summary: 'Read-only audit completed', evidence: 'Read fixture; no source changes', changes: [], checks: ['read contract fixture: AC1/AC2 inspected'], criteria: ['AC1: PASS; reject invalid input', 'AC2: PASS; no writes'], risks: [] });
+    }
+    assert.ok(names.includes('mentor_begin')); assert.ok(names.includes('mentor_verify'));
+    if (!state.run) return response('mentor_begin', { mode: 'collaborative', task: 'Two independent read-only audit investigations' });
+    if (state.tasks.length < 2) return response('mentor_delegate', { goal: `Independent read-only audit ${state.tasks.length ? 'B' : 'A'}`, write_scope: [], acceptance: 'AC1 reject invalid input; AC2 no source edits' });
+    const blocked = state.tasks.find(task => task.status === 'blocked');
+    if (blocked) return response('mentor_guide', { task_id: blocked.taskId, diagnosis: 'Hypothesis: the fixture establishes rejection', next_steps: 'Check AC1 in the fixture; do not edit project source', validation: 'AC1 explicitly requires rejecting invalid input', fallback: 'Report conflicting contract text instead of guessing' });
+    const ready = state.tasks.find(task => task.status === 'ready-review');
+    if (ready) {
+      const checks = ready.verifications?.filter(check => !check.isError && check.readyReportId === ready.report.id) ?? [];
+      return checks.length ? response('mentor_review', { task_id: ready.taskId, verdict: 'accepted', verification_ids: checks.map(check => check.id), evidence: 'Independently read contract; AC1/AC2 confirmed; no source changes in this fixture scenario' }) : response('mentor_verify', { task_id: ready.taskId, tool: 'read', arguments: { file_path: fixture }, label: 'Independently inspect AC1/AC2, not worker assertion' });
+    }
+    return response(null, state.tasks.every(task => task.status === 'accepted') ? 'Native fixture audit finished.' : 'Waiting for genuine worker reports; audit is not complete.');
+  }
+}
+
+
+async function kernel(installMentor = true) {
+  const ctx = new Context();
+  for (const name of ['cordis-plugin-loader', 'dsh-llm', 'dsh-session', 'dsh-session-projection', 'dsh-system-prompt', 'dsh-tools', 'dsh-agent', 'dsh-agent-loop', 'dsh-agent-preset-registry', 'dsh-subagent', 'dsh-subagent-spawn-in-process']) {
+    const mod = await import('@deepseek-ai/' + name);
+    await ctx.plugin(mod.default ?? mod, name === 'dsh-agent-preset-registry' ? { default: 'standard' } : {});
+  }
+  if (installMentor) await ctx.plugin(mentor, {});
+  await ctx.agentPresets.register({ id: 'standard', plugins: [] });
+  await ctx.agentPresets.register({ id: 'codex-mentor', plugins: [{ id: 'mentor-capability-guard', name: new URL('../capability-guard.js', import.meta.url).href }, { id: 'persona', name: runtime.resolve('@deepseek-ai/dsh-persona'), config: { prefix: 'Codex Mentor' } }] });
+  return ctx;
+}
+
+test('real Agent creation and preset switching expose mentor tools, not only persona', async () => {
+  const ctx = await kernel();
+  try {
+    const handle = await ctx.agents.create({ sessionId: 'native-mentor', agentOptions: { provider: 'openai-codex', model: 'gpt-6.1-sol' }, setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'codex-mentor'); } });
+    const names = ctx.tools.schemas(handle.agent).map(item => item.name);
+    assert.ok(names.includes('mentor_delegate'), JSON.stringify(names));
+    assert.ok(names.includes('mentor_status'));
+    await ctx.agentPresets.select(handle.agent, 'standard');
+    assert.ok(!ctx.tools.get('mentor_delegate', handle.agent));
+    await ctx.agentPresets.select(handle.agent, 'codex-mentor');
+    assert.ok(ctx.tools.get('mentor_delegate', handle.agent));
+    await handle.dispose();
+  } finally { await ctx.fiber.dispose(); }
+});
+
+test('Agent-local competing tools must not abort mentor registration on GUI selection', async () => {
+  const ctx = await kernel();
+  try {
+    const handle = await ctx.agents.create({ sessionId: 'agent-local-tool-selection', agentOptions: { provider: 'openai-codex', model: 'gpt-6.1-sol' }, setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'standard'); } });
+    handle.agent.ctx.tools.register({ name: 'spawn_teammate', description: 'Agent-local bridge tool.', parameters: { type: 'object' }, output: { schema: { type: 'object' }, render: () => [] }, execute: async () => ({}) });
+    await ctx.agentPresets.select(handle.agent, 'codex-mentor');
+    assert.ok(ctx.tools.get('mentor_begin', handle.agent), 'own bridge tools are not restrictable globals; they must not cause partial setup rollback');
+    const forbidden = await ctx.tools.execute({ callId: randomUUID(), name: 'spawn_teammate', arguments: {}, agent: handle.agent, signal: new AbortController().signal });
+    assert.equal(forbidden.isError, true, 'own competing tools stay blocked, not silently allowed');
+    await handle.dispose();
+  } finally { await ctx.fiber.dispose(); }
+});
+
+test('selecting the already-mounted mentor preset preserves its actual tools', async () => {
+  const ctx = await kernel();
+  try {
+    const handle = await ctx.agents.create({ sessionId: 'same-preset-selection', agentOptions: { provider: 'openai-codex', model: 'gpt-6.1-sol' }, setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'codex-mentor'); } });
+    assert.ok(ctx.tools.get('mentor_begin', handle.agent));
+    await ctx.agentPresets.select(handle.agent, 'codex-mentor');
+    assert.ok(ctx.tools.get('mentor_begin', handle.agent), 'same-preset selection must not delete freshly reinstalled tools');
+    await handle.dispose();
+  } finally { await ctx.fiber.dispose(); }
+});
+
+test('activating the Host after a mentor session exists repairs its actual tool surface', async () => {
+  const ctx = await kernel(false);
+  try {
+    const handle = await ctx.agents.create({ sessionId: 'existing-mentor', agentOptions: { provider: 'openai-codex', model: 'gpt-6.1-sol' }, setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'codex-mentor'); } });
+    assert.equal(ctx.tools.get('mentor_delegate', handle.agent), undefined);
+    ctx.tools.register({ name: 'read', description: 'Readiness fixture.', parameters: { type: 'object' }, output: { schema: { type: 'object' }, render: () => [] }, execute: async () => ({}) });
+    const unavailable = await ctx.tools.execute({ callId: randomUUID(), name: 'read', arguments: {}, agent: handle.agent, signal: new AbortController().signal });
+    assert.equal(unavailable.isError, true, 'preset guard blocks work even when Host is absent');
+    const host = ctx.plugin(mentor, {}); await host;
+    assert.ok(ctx.tools.get('mentor_delegate', handle.agent), 'Host activation must initialize already-live mentor Agents');
+    await host.dispose(); await host.inertia;
+    assert.equal(ctx.tools.get('mentor_delegate', handle.agent), undefined, 'Host-owned tools unload without disposing Agent');
+    await ctx.plugin(mentor, {});
+    assert.equal(ctx.tools.schemas(handle.agent).filter(tool => tool.name === 'mentor_delegate').length, 1, 'reload repairs once, without duplicate tools');
+    await handle.dispose();
+  } finally { await ctx.fiber.dispose(); }
+});
+
+test('native two-worker audit performs blocked guidance, real checks, independent acceptance and durable replay', { timeout: 10000 }, async () => {
+  const ctx = await kernel(), readActors = [], tempRoot = await mkdtemp(join(tmpdir(), 'dsh-mentor-native-'));
+  try {
+    const persistence = await import('@deepseek-ai/dsh-session-persistence-jsonl');
+    await ctx.plugin(persistence.default ?? persistence, { root: tempRoot, compression: 'none' });
+    const query = await import('@deepseek-ai/dsh-session-query-sqlite');
+    await ctx.plugin(query.default ?? query, { path: ':memory:', openAt: 'never' });
+    const adapter = new ScriptedAdapter(ctx);
+    ctx.llm.registerAdapter(['openai-codex', 'deepseek-official'], adapter);
+    ctx.tools.register({ name: 'read', description: 'Read the test contract fixture.', parameters: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'], additionalProperties: false }, output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] }, execute: async (args, exec) => { assert.equal(args.file_path, fixture); readActors.push(exec.agent.id); return { text: await readFile(fixture, 'utf8') }; } });
+    ctx.tools.register({ name: 'spawn_teammate', description: 'Competing delegation fixture.', parameters: { type: 'object' }, output: { schema: { type: 'object' }, render: () => [] }, execute: async () => { throw new Error('Must not be invoked'); } });
+    const handle = await ctx.agents.create({ sessionId: 'native-two-worker-audit', agentOptions: { provider: 'openai-codex', model: 'gpt-6.1-sol' }, setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'codex-mentor'); } });
+    assert.equal(ctx.tools.get('spawn_teammate', handle.agent), undefined);
+    await until(ctx, handle.agent, state => state.tasks.length === 2 && state.tasks.every(task => task.status === 'accepted'), () => handle.agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Perform two independent read-only investigations of the fixture.' }] })));
+    await ctx.subagents.drainContinuableDescendants([handle.agent]);
+    await handle.agent.whenIdle();
+    const actual = stateOf(ctx, handle.agent), facts = cooperation(actual);
+    assert.equal(facts.delegated, 2); assert.equal(facts.accepted, 2); assert.equal(facts.guidance, 1);
+    assert.equal(facts.independentChecks, 2); assert.equal(facts.outstanding.length, 0);
+    assert.equal(readActors.filter(id => id === handle.agent.id).length, 2, 'mentor really ran two independent checks');
+    assert.equal(new Set(adapter.calls.filter(call => call.model === 'deepseek-flash').map(call => call.sessionId)).size, 2);
+    assert.ok(adapter.calls.every(call => call.model === (call.provider === 'openai-codex' ? 'gpt-6.1-sol' : 'deepseek-flash')));
+    const replay = handle.agent.session.snapshotEvents().reduce(fold, initial(handle.agent.session.header));
+    assert.deepEqual(view(replay), view(actual));
+    const messages = handle.agent.session.snapshotEvents().filter(event => event.type === 'assistant/message').map(event => event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join(''));
+    assert.ok(messages.some(text => text.includes('实际派工 2') && text.includes('接受 2')));
+    assert.ok(summaryText(actual, { toolsReady: true }).includes('导师实际检查 2'));
+    await handle.dispose();
+    let resumed;
+    try { resumed = await ctx.agents.resume({ resumeSessionId: 'native-two-worker-audit', setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'codex-mentor'); } }); }
+    catch (error) { error.message += '\nLifecycle rows: ' + JSON.stringify(handle.agent.session.snapshotEvents().filter(e => ['turn/start', 'turn/end', 'step/start', 'step/end'].includes(e.type)).map(e => ({ seq: e.seq, type: e.type, data: e.data }))); throw error; }
+    assert.ok(ctx.tools.get('mentor_delegate', resumed.agent));
+    assert.deepEqual(cooperation(stateOf(ctx, resumed.agent)), facts, 'cold JSONL resume preserves genuine task/worker/check facts');
+    await resumed.dispose();
+  } finally {
+    await ctx.fiber.dispose();
+    const target = resolve(tempRoot);
+    assert.equal(dirname(target), resolve(tmpdir())); assert.match(basename(target), /^dsh-mentor-native-/);
+    await rm(target, { recursive: true, force: true });
+  }
+});
