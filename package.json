@@ -1,6 +1,6 @@
 {
   "name": "dsh-codex-mentor",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Codex Mentor: GPT guidance, fixed DeepSeek Flash workers, and replayable task memory for DSH.",
   "private": true,
   "repository": { "type": "git", "url": "https://github.com/LiuyichenYanwushang/dsh-codex-mentor.git" },

@@ -65,9 +65,9 @@ class ScriptedAdapter extends LlmAdapter {
     const ready = state.tasks.find(task => task.status === 'ready-review');
     if (ready) {
       const checks = ready.verifications?.filter(check => !check.isError && check.readyReportId === ready.report.id) ?? [];
-      return checks.length ? response('mentor_review', { task_id: ready.taskId, verdict: 'accepted', verification_ids: checks.map(check => check.id), evidence: 'Independently read contract; AC1/AC2 confirmed; no source changes in this fixture scenario' }) : response('mentor_verify', { task_id: ready.taskId, tool: 'read', arguments: { file_path: fixture }, label: 'Independently inspect AC1/AC2, not worker assertion' });
+      return checks.length ? response('mentor_review', { task_id: ready.taskId, verdict: 'accepted', verification_ids: checks.map(check => check.id), report_reliable: true, assessments: ['AC1', 'AC2'].map(criterion => ({ criterion, passed: true, expected: criterion === 'AC1' ? 'Reject invalid input' : 'No source writes', observed: 'Independent read of fixture contract; both clauses present', interpretation: 'Fixture satisfies the assigned contract inspection, not an implementation proof', scope: 'Native fixture only, no production project inspected', verification_ids: checks.map(check => check.id) })), evidence: 'Independently read contract; AC1/AC2 confirmed; no source changes in this fixture scenario' }) : response('mentor_verify', { task_id: ready.taskId, tool: 'read', arguments: { file_path: fixture }, label: 'Independently inspect AC1/AC2, not worker assertion' });
     }
-    return response(null, state.tasks.every(task => task.status === 'accepted') ? 'Native fixture audit finished.' : 'Waiting for genuine worker reports; audit is not complete.');
+    return state.tasks.every(task => task.status === 'accepted') ? response(null, 'Native fixture audit finished.') : response('mentor_wait', {});
   }
 }
 
@@ -148,6 +148,8 @@ test('native two-worker audit performs blocked guidance, real checks, independen
     await ctx.plugin(persistence.default ?? persistence, { root: tempRoot, compression: 'none' });
     const query = await import('@deepseek-ai/dsh-session-query-sqlite');
     await ctx.plugin(query.default ?? query, { path: ':memory:', openAt: 'never' });
+    const stops = [];
+    ctx.on('subagent/end', info => stops.push({ id: info.id, stopReason: info.stopReason }));
     const adapter = new ScriptedAdapter(ctx);
     ctx.llm.registerAdapter(['openai-codex', 'deepseek-official'], adapter);
     ctx.tools.register({ name: 'read', description: 'Read the test contract fixture.', parameters: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'], additionalProperties: false }, output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] }, execute: async (args, exec) => { assert.equal(args.file_path, fixture); readActors.push(exec.agent.id); return { text: await readFile(fixture, 'utf8') }; } });
@@ -166,8 +168,11 @@ test('native two-worker audit performs blocked guidance, real checks, independen
     const replay = handle.agent.session.snapshotEvents().reduce(fold, initial(handle.agent.session.header));
     assert.deepEqual(view(replay), view(actual));
     const messages = handle.agent.session.snapshotEvents().filter(event => event.type === 'assistant/message').map(event => event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join(''));
-    assert.ok(messages.some(text => text.includes('实际派工 2') && text.includes('接受 2')));
-    assert.ok(summaryText(actual, { toolsReady: true }).includes('导师实际检查 2'));
+    assert.equal(messages.filter(text => text === 'Native fixture audit finished.').length, 1, 'primary result appears once, not a statistics-only or late-notice answer');
+    assert.ok(!messages.some(text => text.includes('模式执行摘要')), 'statistics do not alter the provider final');
+    assert.ok(summaryText(actual, { toolsReady: true }).includes('已登记验收检查 2'));
+    assert.ok(stops.length >= 3 && stops.every(info => info.stopReason === 'completed'), JSON.stringify(stops));
+    assert.equal(adapter.calls.filter(call => call.model === 'deepseek-flash').length, 5, 'report pause and accepted cold resume do not invoke the worker model again');
     await handle.dispose();
     let resumed;
     try { resumed = await ctx.agents.resume({ resumeSessionId: 'native-two-worker-audit', setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'codex-mentor'); } }); }

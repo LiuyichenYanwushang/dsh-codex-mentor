@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createRequire, registerHooks } from 'node:module';
 import { dirname, resolve } from 'node:path';
 const runtime = createRequire(resolve(process.env.DSH_RUNTIME_DIR ?? resolve(dirname(process.execPath), '../lib/node_modules/@deepseek-ai/dsh'), 'package.json'));
@@ -7,6 +9,111 @@ registerHooks({ resolve(specifier, context, next) { return next((specifier.start
 const { snapshotJsonValue } = await import('@deepseek-ai/dsh-util-values');
 const { apply, Config } = await import('../index.js');
 const { initial, fold, view, encode, contextText, KEY, PRESET } = await import('../ledger.js');
+const { cooperation } = await import('../experience.js');
+
+test('requeued user input cannot replace the parent run; a genuinely new input archives it', async () => {
+  const h = harness(), mentor = await h.makeAgent('parent');
+  const input = { id: 'input-1', source: { kind: 'user' }, content: [{ type: 'text', text: 'overview' }] };
+  h.append(mentor, 'user/message', input);
+  await h.call(mentor, 'mentor_begin', { mode: 'collaborative', task_kind: 'audit', task: 'Project overview' });
+  const original = h.state(mentor).run;
+  h.append(mentor, 'agent/inbox/spliced', { inserted: [input] });
+  for (const goal of ['Progress', 'Boundaries']) {
+    const { record } = await h.call(mentor, 'mentor_delegate', { goal, write_scope: [], acceptance: 'A1: sourced overview' });
+    assert.equal(record.runId, original.runId);
+    await h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'cancelled', evidence: 'fixture complete' });
+  }
+  assert.equal(h.state(mentor).run.task, original.task);
+  h.append(mentor, 'user/message', { ...input, id: 'input-2' });
+  const status = await h.call(mentor, 'mentor_status', {});
+  assert.equal(status.activeRun, null);
+  assert.equal(status.lastCompletedRun.runId, original.runId);
+  assert.equal(status.recentTaskSummaries.length, 2);
+  assert.equal(status.lastRunCooperation.delegated, 2);
+  await h.call(mentor, 'mentor_begin', { mode: 'collaborative', task: 'New request B' });
+  const newerRun = h.state(mentor).run.runId;
+  h.append(mentor, 'agent/inbox/spliced', { inserted: [input] });
+  assert.equal(h.state(mentor).run.runId, newerRun, 'older input A cannot clear newer run B');
+  assert.equal(h.state(mentor).lastInputId, 'input-2');
+});
+
+test('formal reports and terminal reviews pause cleanly, never reject the next step', async () => {
+  const h = harness(), mentor = await h.makeAgent('parent');
+  const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Overview', write_scope: [], acceptance: 'A1: overview' });
+  const worker = h.agents.get(record.childId);
+  await h.call(worker, 'mentor_report', { task_id: record.taskId, status: 'blocked', summary: 'Need evidence', evidence: 'No safe source', attempts: 'read entry', question: 'Which source?' });
+  const decision = await worker.localHandlers.get('agent/pre-step')({}, () => ({ kind: 'enter', messages: ['should not run'] }));
+  assert.deepEqual(decision, { kind: 'enter', messages: [] });
+  await h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'cancelled', evidence: 'Stop' });
+  assert.deepEqual(await worker.localHandlers.get('agent/pre-step')({}, () => ({ kind: 'enter', messages: [] })), { kind: 'enter', messages: [] });
+  assert.deepEqual(await worker.localHandlers.get('agent/pre-step')({}, () => ({ kind: 'reject' })), { kind: 'reject' }, 'a real policy rejection must remain a refusal');
+});
+
+test('read-only capabilities fail before spawn; overview budget is one worker and wait yields', async () => {
+  const h = harness(), mentor = await h.makeAgent('m');
+  await h.call(mentor, 'mentor_begin', { mode: 'collaborative', task_kind: 'overview', task: 'Current project status' });
+  await assert.rejects(h.call(mentor, 'mentor_delegate', { goal: 'Git inspection', write_scope: [], acceptance: 'A1: clean worktree', required_capabilities: ['shell'] }), /unavailable capabilities/);
+  assert.equal(h.state(mentor).tasks.length, 0);
+  const delegated = await h.call(mentor, 'mentor_delegate', { goal: 'Progress and blockers only', write_scope: [], acceptance: 'A1: sources' });
+  assert.equal(delegated.effectiveCapabilities.shell, false);
+  assert.equal(delegated.effectiveCapabilities.tests, false);
+  assert.equal(delegated.record.parentRunId, h.state(mentor).run.runId);
+  await assert.rejects(h.call(mentor, 'mentor_delegate', { goal: 'Duplicate overview', write_scope: [], acceptance: 'A1: same sources' }), /one worker/);
+  assert.equal((await h.call(mentor, 'mentor_wait', {})).waiting, true);
+  assert.equal(mentor.concluded, true);
+});
+
+test('a native stop without a report stays incomplete; only proven successful redundant notices are filtered', async () => {
+  const h = harness(), mentor = await h.makeAgent('m');
+  const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Inspect', write_scope: [], acceptance: 'A1: report' });
+  const message = { source: { kind: 'subagent-settled', senderSessionId: record.childId, summary: `Background subagent ${record.childId} finished and will do no further work unless you send it more.` }, content: [{ type: 'text', text: 'plain closing' }] };
+  h.append(mentor, 'user/message', message);
+  assert.equal(h.state(mentor).tasks[0].status, 'stopped');
+  let decision = await mentor.localHandlers.get('agent/pre-step')({ messages: [message] }, async () => ({ kind: 'enter', messages: [message] }));
+  assert.match(decision.messages[0].content[0].text, /WITHOUT a reviewable report/);
+  await assert.rejects(h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'accepted', evidence: 'closing says done' }), /ready-review/);
+  await h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'cancelled', evidence: 'Cancel unfinished task' });
+  decision = await mentor.localHandlers.get('agent/pre-step')({ messages: [message] }, async () => ({ kind: 'enter', messages: [message] }));
+  assert.deepEqual(decision, { kind: 'enter', messages: [] });
+  const failure = { ...message, source: { ...message.source, summary: 'worker failed before it finished' } };
+  decision = await mentor.localHandlers.get('agent/pre-step')({ messages: [failure] }, async () => ({ kind: 'enter', messages: [failure] }));
+  assert.equal(decision.messages[0], failure, 'real failure is never hidden by accepted/cancelled state');
+});
+
+test('successful log reading requires a semantic assertion; old read-only evidence is reusable only for unchanged named inputs', async () => {
+  const h = harness(), mentor = await h.makeAgent('m');
+  const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Inspect', write_scope: [], acceptance: 'A1: required result' });
+  const worker = h.agents.get(record.childId);
+  let digest = 'a'.repeat(64), executions = 0;
+  h.ctx.tools.execute = async input => input.name === 'bash' ? { isError: false, value: { kind: 'foreground', exitCode: 0, stdout: { truncated: false, text: JSON.stringify([{ path: 'contract.txt', sha256: digest }]) } } } : (++executions, { isError: false, value: { text: 'required result observed' } });
+  const check = await h.call(mentor, 'mentor_verify', { task_id: record.taskId, tool: 'read', arguments: { file_path: 'contract.txt' }, input_paths: ['contract.txt'], kind: 'historical-log', label: 'A1' });
+  assert.equal(check.executionSucceeded, true); assert.equal(check.criterionSatisfied, null);
+  await h.call(worker, 'mentor_report', { task_id: record.taskId, status: 'ready-review', summary: 'Inspected', evidence: 'contract.txt', changes: [], checks: [], criteria: ['A1: PASS; invalid input emits FAIL as required'], risks: [] });
+  const review = { task_id: record.taskId, verdict: 'accepted', verification_ids: [check.checkId], evidence: 'interpreted execution', report_reliable: true, assessments: [{ criterion: 'A1', passed: false, expected: 'required result', observed: 'failure in a successfully read log', interpretation: 'reading success is not a passed result', scope: 'contract.txt only', verification_ids: [check.checkId] }] };
+  await assert.rejects(h.call(mentor, 'mentor_review', review, true), /interpreted assertion/);
+  await assert.rejects(h.call(mentor, 'mentor_review', { ...review, assessments: undefined }, true), /explicit assertions/);
+  review.assessments[0].passed = true;
+  review.assessments[0].observed = 'required result observed';
+  review.assessments[0].interpretation = 'observed equals the named requirement';
+  digest = 'b'.repeat(64);
+  await assert.rejects(h.call(mentor, 'mentor_review', review, true), /unchanged fingerprinted/);
+  digest = 'a'.repeat(64);
+  await h.call(mentor, 'mentor_review', review, true);
+  assert.equal(executions, 1, 'the inspection itself was not rerun just because the report came later');
+  assert.equal(h.state(mentor).tasks[0].review.assessments[0].criterionSatisfied, true);
+});
+
+test('fingerprint shell command hashes the actual file and rejects an unrelated proof scope', async () => {
+  const h = harness(), mentor = await h.makeAgent('m');
+  const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Inspect fixture', write_scope: [], acceptance: 'A1: contract' });
+  h.ctx.tools.execute = async input => input.name === 'bash' ? { isError: false, value: { kind: 'foreground', exitCode: 0, stdout: { truncated: false, text: execFileSync('bash', ['-c', input.arguments.command], { cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8' }) } } } : { isError: false, value: { text: 'fixture read' } };
+  const args = { task_id: record.taskId, tool: 'read', arguments: { file_path: 'test/fixtures/contract.txt' }, label: 'A1', input_paths: ['README.md'] };
+  await assert.rejects(h.call(mentor, 'mentor_verify', args), /actual read/);
+  args.input_paths = ['test/fixtures/contract.txt'];
+  const result = await h.call(mentor, 'mentor_verify', args);
+  assert.equal(result.reusableInputs, true);
+  assert.match(result.record.inputs[0].sha256, /^[a-f0-9]{64}$/);
+});
 
 function harness(overrides = {}) {
   const handlers = new Map(), agents = new Map(), projections = new Map(), tools = new Map();
@@ -62,7 +169,11 @@ function harness(overrides = {}) {
     await handlers.get('agent/created')({ agent });
     return agent;
   }
-  async function call(agent, name, args) {
+  async function call(agent, name, args, raw = false) {
+    if (!raw && name === 'mentor_review' && args.verdict === 'accepted' && args.verification_ids?.length) {
+      const report = agent.session.states[KEY].tasks.find(task => task.taskId === args.task_id)?.report;
+      args = { report_reliable: true, assessments: report?.evidenceGate.criteria.map(item => ({ criterion: item.split(':')[0].trim(), passed: true, expected: 'fixture requirement', observed: 'fixture independently inspected', interpretation: 'observed fixture matches the requirement', scope: 'only the fixture, not production', verification_ids: args.verification_ids })), ...args };
+    }
     const definition = tools.get(agent.id).get(name); assert.ok(definition, `${name} visible to ${agent.id}`);
     const callId = 'call-' + (++n);
     append(agent, 'tool/call', { name, callId, arguments: JSON.stringify(args) });
@@ -187,7 +298,7 @@ test('read-only and terminal workers cannot execute mutation or resume on anothe
   await assert.rejects(request({}, async () => ({ provider: 'openai-codex', model: 'gpt-6-luna' })), /pinned/);
   await h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'cancelled', evidence: 'No longer needed' });
   assert.equal(h.state(worker).tasks[0].status, 'cancelled');
-  assert.deepEqual(await worker.localHandlers.get('agent/pre-step')({}, async () => ({ kind: 'enter', messages: [] })), { kind: 'reject' });
+  assert.deepEqual(await worker.localHandlers.get('agent/pre-step')({}, async () => ({ kind: 'enter', messages: [] })), { kind: 'enter', messages: [] });
   assert.match(guard({ name: 'read' }), /closed/);
 });
 

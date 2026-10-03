@@ -24,7 +24,7 @@ export function argsObject(value, keys) {
   return value;
 }
 export function initial(header, inheritedEventCount = 0) {
-  return { sessionId: header.id, parentId: header.origin === 'subagent' ? header.parentSession ?? null : null, floor: inheritedEventCount, tasks: [], checkpoint: '', notes: [], pending: {}, run: null, consent: null, permissionCalls: {}, recentRecordIds: [] };
+  return { sessionId: header.id, parentId: header.origin === 'subagent' ? header.parentSession ?? null : null, floor: inheritedEventCount, tasks: [], checkpoint: '', notes: [], pending: {}, run: null, lastCompletedRun: null, lastInputId: null, recentInputIds: [], consent: null, permissionCalls: {}, recentRecordIds: [] };
 }
 export function encode(record) { return PREFIX + JSON.stringify({ version: 1, ...record }); }
 function decode(content) {
@@ -70,7 +70,10 @@ function update(state, record, seq) {
   // Sender-side commits and the later tool result represent ONE accepted side effect.
   if (record.id && state.recentRecordIds.includes(record.id)) return state;
   if (record.id) state = { ...state, recentRecordIds: [...state.recentRecordIds, record.id].slice(-512) };
-  if (record.kind === 'begin') return { ...state, run: { ...record, preliminaryCalls: 0 } };
+  if (record.kind === 'begin') {
+    if (state.parentId || (record.sessionId && record.sessionId !== state.sessionId)) return state;
+    return { ...state, lastCompletedRun: state.run && state.run.runId !== record.runId ? state.run : state.lastCompletedRun, run: { ...record, preliminaryCalls: 0 } };
+  }
   // Records are produced by validated tools or authenticated adjacent-Agent messages.
   if (record.kind === 'memory') {
     if (typeof record.checkpoint === 'string') return { ...state, checkpoint: record.checkpoint };
@@ -91,7 +94,8 @@ function update(state, record, seq) {
       if (record.childId !== previous.childId) return state;
       task = { ...previous, status: record.status, report: record, seq }; break;
     case 'verify': task = { ...previous, verifications: [...(previous.verifications ?? []), { ...record, seq }].slice(-32), seq }; break;
-    case 'guidance': task = { ...previous, status: 'implementing', guidance: record, guidanceCount: (previous.guidanceCount ?? 0) + 1, seq }; break;
+    case 'stopped': task = { ...previous, status: 'stopped', lastStop: record, seq }; break;
+    case 'guidance': task = { ...previous, status: 'implementing', guidance: record, guidanceCount: (previous.guidanceCount ?? 0) + 1, guidanceKinds: { ...(previous.guidanceKinds ?? {}), [record.purpose ?? 'task-guidance']: (previous.guidanceKinds?.[record.purpose ?? 'task-guidance'] ?? 0) + 1 }, seq }; break;
     case 'review': task = { ...previous, status: record.verdict === 'rework' ? 'implementing' : record.verdict, review: record, reworkCount: (previous.reworkCount ?? 0) + (record.verdict === 'rework' ? 1 : 0), seq }; break;
     default: return state;
   }
@@ -136,7 +140,19 @@ export function fold(state, event) {
   }
   if (event.type !== 'user/message') return state;
   const message = event.data;
-  if (!state.parentId && message.source?.kind === 'user' && !state.tasks.some(task => !TERMINAL.includes(task.status)) && (state.run || state.consent)) state = { ...state, run: null, consent: null, permissionCalls: {} };
+  if (!state.parentId && message.source?.kind === 'user') {
+    // A durable input can also be spliced later; that is not a new human request.
+    const fresh = !message.id || !state.recentInputIds.includes(message.id);
+    if (fresh && (!event.surfaceOp || event.surfaceOp === 'append') && !state.tasks.some(task => !TERMINAL.includes(task.status))) {
+      state = { ...state, lastCompletedRun: state.run ?? state.lastCompletedRun, run: null, consent: null, permissionCalls: {} };
+    }
+    if (message.id && fresh) state = { ...state, lastInputId: message.id, recentInputIds: [...state.recentInputIds, message.id] };
+  }
+  if (!state.parentId && message.source?.kind === 'subagent-settled') {
+    const task = state.tasks.find(item => item.childId === message.source.senderSessionId);
+    if (!task || [...TERMINAL, 'blocked', 'ready-review'].includes(task.status)) return state;
+    return update(state, { version: 1, kind: 'stopped', taskId: task.taskId, summary: 'Worker stopped without a reviewable report', nativeSummary: message.source.summary }, event.seq);
+  }
   if (message.source?.kind === 'codex-mentor-ledger') return update(state, message.source.record, event.seq);
   const record = decode(message.content);
   if (!record) return state;
@@ -151,7 +167,7 @@ export function fold(state, event) {
   return state;
 }
 export function view(state) {
-  return { sessionId: state.sessionId, role: state.parentId ? 'worker' : 'mentor', run: state.run, directAuthorized: !!state.consent, checkpoint: state.checkpoint, tasks: state.tasks, notes: state.notes };
+  return { sessionId: state.sessionId, role: state.parentId ? 'worker' : 'mentor', run: state.run, activeRun: state.run, lastCompletedRun: state.lastCompletedRun, directAuthorized: !!state.consent, checkpoint: state.checkpoint, tasks: state.tasks, activeTasks: state.tasks.filter(task => !TERMINAL.includes(task.status)), recentTaskSummaries: state.tasks.slice(-8).map(task => ({ taskId: task.taskId, runId: task.runId, childId: task.childId, goal: task.goal?.slice(0, 200), status: task.status, registeredChecks: task.verifications?.length ?? 0 })), notes: state.notes };
 }
 export function contextText(state) {
   const data = view(state);
@@ -159,6 +175,8 @@ export function contextText(state) {
   const compact = {
     ...data,
     checkpoint: data.checkpoint.slice(0, 2000),
+    activeTasks: data.activeTasks.map(task => ({ taskId: task.taskId, status: task.status })),
+    historyMeaning: 'tasks/activeTasks are active work; recentTaskSummaries and lastCompletedRun preserve history. Empty active tasks does not mean no prior collaboration.',
     tasks: data.tasks.filter(task => !TERMINAL.includes(task.status)).map(task => ({
       taskId: task.taskId, childId: task.childId, goal: task.goal?.slice(0, 400), writeScope: task.writeScope, acceptance: task.acceptance?.slice(0, 400), status: task.status,
       blocker: task.report?.status === 'blocked' ? task.report.question?.slice(0, 500) : undefined,

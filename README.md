@@ -17,7 +17,19 @@ DSH 0.2.0-rc.2 的独立模式 bundle。非 OpenAI/DeepSeek 官方产品；提�
 
 Flash 默认自动选择已配置且目录中包含 `deepseek-flash`（显示名 DeepSeek-V41-Flash）的 `deepseek-account`，其次 `deepseek-official`。选择发生在派工前，实际路由写入子会话描述和任务记录；推理失败不会自动换成 GPT，也不会切换账户。其他 provider 可以通过 `codex-mentor-host` 配置显式指定。缺凭据时在 Settings → Models 配置；目录可用不是推理成功的证明。
 
-## 0.4：单插件安装
+## 0.5：减少流程摩擦
+
+- 父 run 绑定会话和输入身份；同一用户输入的日志/队列重放不会重新 begin。新请求归档 `lastCompletedRun`，状态同时暴露 `activeRun`、`activeTasks`、`recentTaskSummaries` 和上一轮统计。
+- 派工返回 `effectiveCapabilities`，可声明 `required_capabilities` 预先拒绝不可执行任务。`write_scope: []` 禁用所有 Shell，包括只读 Git、hash 和测试；能力只描述任务级工具策略，原生工具可用性与沙箱仍须核查。
+- 正式报告和终态以正常空步骤暂停，不再制造原生 refusal；普通 closing 不会生成 ready-review。缺报告停止显示 `stopped`，只能补交或取消。正常完成的冗余通知不再触发模型回复，错误/取消/超限通知仍保留。
+- `mentor_wait` 使用原生结束当前 turn 来让出执行，报告到达后继续；它不是 Agent Teams，也不是轮询或额外计时器。
+- `mentor_verify` 区分 `executionSucceeded` 与尚未判定的 `criterionSatisfied`；`mentor_review accepted` 必须对每个报告 criterion 记录 expected/observed/interpretation/scope 和检查 ID，并明确整份报告可靠。不支持模糊的“整体接受、附带错误不采用”，须重交修正报告。
+- 可用 `input_paths` 对证据依赖文件在执行前后做 SHA-256；只读文件读取、实际读取目标包含在指纹集合中、执行目录和内容未变且导师确认 claim/依赖范围相符时可复用报告前的检查。Shell 测试、网络和搜索证据暂不跨报告自动复用：依赖范围无法安全推断。未声明文件、环境、网络状态及新 claim 不在指纹保证范围内。指纹仍通过原生 Shell 权限执行，不绕过沙箱。
+- `task_kind: overview` 限为一个 worker；提示词要求关键 claim 抽样、版本一致性与停止条件，禁止把概览默认扩大成审计。工作流统计只在工具元数据中展示，不再修改 final 正文。
+
+原生 DSH 当前没有禁用 settlement 唤醒的 API；插件只能减少冗余模型请求，不能取消所有原生空 turn/后台通知。M14 暂不增加目录工具，优先使用窄范围发现；复杂断言质量仍取决于导师判断。
+
+## 单插件安装
 
 原来的模式修复和 Host 热加载激活合并到主 bundle。Host 使用相对、带版本的入口文件（内部载入带版本的模块 URL），不包含本机路径；升级不再需要另装 live-fix。安装器若报告 restart-required，仍应以其状态和 `CodexMentor.diagnostics` 的实际版本为准，不能仅凭包版本判断已生效。已有会话保留其 preset revision，不承诺所有模块都在不重启时更新。
 
@@ -35,7 +47,7 @@ Flash 上下文能力为 1,000,000 token，输出能力按用户指定的 384k �
 - `mentor_begin` 区分 collaborative、simple、direct、diagnostic。模式已选、工具就绪、路由已配置、实际启动 worker 是四个独立状态；诊断不冒充推理成功。
 - 缺能力时仅允许诊断/询问。独立的 preset guard 在 Host 不可用时仍禁止执行原任务，不能静默变成普通单代理或 Agent Teams。
 - 协作模式派工前允许最多三次初步调查；之后必须真实派工，或经用户明确选择直接执行。直接执行授权来自原生 `ask_user_question` 的实际单选回答，不接受模型口头声称用户同意、跳过或未答。
-- `mentor_status` 和自动附加到最终文本的模式执行摘要显示真实派工、指导、接受、返工、取消和检查数量；待验收和仍运行的 worker 会明确标记。待办清单、shell 作业不算派工。
+- `mentor_status` 显示真实派工、指导用途、接受、返工、取消和已登记验收检查（按证据类型区分）；不代表所有导师操作数量。待办、shell 作业不算派工，统计不追加或替换 final。
 - blocked/ready-review 的 worker 不会被自己的记账通知重新唤起工作；收到指导/返工决定才继续。接管需显式说明、取消 worker 并取得直接执行授权。
 
 ## 协作
@@ -43,7 +55,7 @@ Flash 上下文能力为 1,000,000 token，输出能力按用户指定的 384k �
 - GPT 用 `mentor_delegate` 派工；每个任务有独立 id、写范围、验收标准和固定 Flash 路由。可附不变量、接口、失败测试、开放问题和数学模型，保留 worker 的实现自主权。
 - Flash 用 `mentor_report` 汇报；blocked 必须包含尝试、证据、具体问题，blocked 和 ready-review 会结束当前执行轮次。
 - GPT 用 `mentor_guide` 给出诊断、下一步、验证标准、失败分支；投递给正在运行或可恢复的直接子会话。
-- ready-review 必须通过 Evidence Gate：改动、检查、每个验收标准结果、偏离、假设和风险；GPT 用 `mentor_verify` 实际运行独立检查，并把返回的 `verification_ids` 交给 `mentor_review` 接受、要求返工或取消。缺少实际检查、失败检查、旧版本检查、仍在后台运行的检查都不能接受；检查覆盖是否充分仍由导师判断。所有终态同步给 worker 并阻止其继续执行；ready-review 不等于 accepted。
+- ready-review 必须通过 Evidence Gate：改动、检查、每个验收标准结果、偏离、假设和风险；GPT 用 `mentor_verify` 实际运行独立检查，并把返回的 `verification_ids` 交给 `mentor_review` 接受、要求返工或取消。缺少实际检查、失败检查、已变化的旧证据、仍在后台运行的检查都不能接受；成功执行不等于 criterion 通过，检查覆盖与语义断言仍由导师判断。所有终态同步给 worker 并阻止其继续执行；ready-review 不等于 accepted。
 - `mentor_status` 默认返回紧凑目录，传 `task_id` 获取完整任务证据；`mentor_memory` 保存任务检查点或带验证状态的会话笔记。
 - 默认最多 3 个未验收任务，同一个会话最多 64 个任务、20 条笔记；默认不允许递归派工。
 
@@ -82,7 +94,7 @@ npm pack --ignore-scripts
 
 ## 验证
 
-在源码目录运行 `node --test test/*.test.mjs`（tarball 不包含测试；使用已安装的 DSH runtime 依赖，可用 `DSH_RUNTIME_DIR` 指定安装目录）。除协议测试外，使用真实 Cordis、AgentLoop、ToolRuntime、spawn continuable worker、JSONL 持久化和 session query，覆盖旧会话补装、Host 卸载/重载、缺能力阻止执行、双 worker 审查、阻塞→指导、实际独立检查→接受、日志重放及冷恢复。模型适配器是确定性脚本，不调用真实 GPT/Flash，不证明模型的复杂度分类或判断质量。
+在源码目录运行 `node --test test/*.test.mjs`（tarball 不包含测试；使用已安装的 DSH runtime 依赖，可用 `DSH_RUNTIME_DIR` 指定安装目录）。除协议测试外，使用真实 Cordis、AgentLoop、ToolRuntime、spawn continuable worker、JSONL 持久化和 session query，覆盖旧会话补装、Host 卸载/重载、缺能力阻止执行、双 worker 审查、阻塞→指导、实际独立检查→逐 criterion 接受、日志重放及冷恢复，并断言正式报告/接受冷恢复没有 refusal、没有多余 worker 推理，最终回答只出现一次。补充输入重放、历史归档、缺报告、能力拒绝、概览预算、语义断言和证据指纹复用的回归。模型适配器是确定性脚本，不调用真实 GPT/Flash，不证明模型的复杂度分类或判断质量。
 
 Host Inspect provider `CodexMentor.diagnostics` 是只读路由/模式及 liveSessions 工具就绪诊断，`state` 仅读取请求者自己的导师会话。安装和目录检查不等于真实模型推理或导师判断质量的验证。
 
