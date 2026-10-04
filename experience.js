@@ -1,5 +1,5 @@
-import { TERMINAL } from './ledger.js?mentor=0.6.1';
-export { DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './ledger.js?mentor=0.6.1';
+import { TERMINAL } from './ledger.js?mentor=0.7.0';
+export { DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './ledger.js?mentor=0.7.0';
 
 export function effectiveCapabilities(writeScope) {
   const writable = writeScope.length > 0;
@@ -24,7 +24,10 @@ export function cooperation(state, run = state.run) {
     rework: tasks.reduce((n, task) => n + (task.reworkCount ?? 0), 0),
     guidance: tasks.reduce((n, task) => n + (task.guidanceCount ?? 0), 0),
     cancelled: tasks.filter(task => task.started && task.status === 'cancelled').length,
-    outstanding: state.tasks.filter(task => !TERMINAL.includes(task.status)).map(task => ({ taskId: task.taskId, childId: task.childId, status: task.status })),
+    outstanding: tasks.filter(task => !TERMINAL.includes(task.status)).map(task => ({ taskId: task.taskId, childId: task.childId, status: task.status })),
+    runOutstanding: tasks.filter(task => !TERMINAL.includes(task.status)).map(task => task.taskId),
+    sessionOutstanding: state.tasks.filter(task => !TERMINAL.includes(task.status)).map(task => task.taskId),
+    closedUnaccepted: tasks.filter(task => task.status === 'closed-unaccepted').length,
     registeredCheckLabel: '已登记验收检查（不含未登记的导师操作）',
     registeredChecksByKind: tasks.flatMap(task => task.verifications ?? []).reduce((counts, check) => ({ ...counts, [check.evidenceKind ?? 'other']: (counts[check.evidenceKind ?? 'other'] ?? 0) + 1 }), {}),
     guidanceByPurpose: tasks.reduce((counts, task) => { for (const [kind, count] of Object.entries(task.guidanceKinds ?? {})) counts[kind] = (counts[kind] ?? 0) + count; return counts; }, {}),

@@ -36,7 +36,7 @@ class InterruptedAdapter extends LlmAdapter {
     assert.equal(state.checkpoint, 'checkpoint-before-simulated-provider-interruption');
     assert.equal(state.tasks[0].guidance.purpose, 'lifecycle-repair');
     assert.match(state.tasks[0].guidance.nextSteps, /^继续生成/);
-    return yield* reply('mentor_report', { task_id: state.tasks[0].taskId, status: 'ready-review', summary: 'Recovered original checkpoint', evidence: 'Scripted fixture only; no external provider inference or implementation accepted', changes: [], checks: [], criteria: ['AC1: PASS; original checkpoint recovered'], risks: [] });
+    return yield* reply('mentor_report', { task_id: state.tasks[0].taskId, status: 'ready-review', summary: 'Recovered original checkpoint', evidence: 'Scripted fixture only; no external provider inference or implementation accepted', changes: [], checks: [], criteria: [{ id: 'AC1', status: 'PASS', evidence: 'Original checkpoint recovered in the same Flash child', scope: 'Scripted cold-continuation fixture only; no external provider or implementation verified' }], risks: [] });
   }
 }
 function observe(ctx, agent, predicate, action) {
@@ -94,6 +94,8 @@ test('mentor_resume cold-restores the same failed Flash child and checkpoint wit
     assert.equal(recovered.tasks.length, 1, 'No replacement task or worker was spawned');
     assert.deepEqual({ taskId: task.taskId, childId: task.childId, runId: task.runId, route: task.route }, identity);
     assert.equal(task.status, 'ready-review'); assert.equal(task.review, undefined);
+    assert.deepEqual(task.criteria, [{ id: 'AC1', description: 'AC1: original checkpoint recovered' }]);
+    assert.deepEqual(task.report.evidenceGate.criteria.map(({ id, status }) => ({ id, status })), [{ id: 'AC1', status: 'PASS' }]);
     assert.equal(task.guidanceKinds['lifecycle-repair'], 1);
     assert.equal(adapter.calls.filter(call => call.id === identity.childId).length, 3);
     assert.deepEqual(view(handle.agent.session.snapshotEvents().reduce(fold, initial(handle.agent.session.header))), view(recovered));

@@ -59,14 +59,14 @@ class TeamAdapter extends LlmAdapter {
       if (task.teamName === 'flash-a' && !task.guidance) {
         yield* response('mentor_report', { task_id: task.taskId, status: 'blocked', summary: 'Need contract interpretation', evidence: 'AC1 was read from the fixture', attempts: 'Inspected fixture; have not guessed the required behavior', question: 'Does AC1 require rejecting invalid input?' }); return;
       }
-      yield* response('mentor_report', { task_id: task.taskId, status: 'ready-review', summary: task.guidance ? 'Contract inspection corrected after guidance' : 'Contract inspected; awaiting independent review', evidence: 'Read the contract fixture; no source edits', changes: [], checks: ['Read contract fixture AC1 and AC2'], criteria: ['AC1: PASS; invalid parser input is rejected by the stated contract', 'AC2: PASS; audit only, no writes'], risks: [] }); return;
+      yield* response('mentor_report', { task_id: task.taskId, status: 'ready-review', summary: task.guidance ? 'Contract inspection corrected after guidance' : 'Contract inspected; awaiting independent review', evidence: 'Read the contract fixture; no source edits', changes: [], checks: ['Read contract fixture AC1 and AC2'], criteria: [{ id: 'AC1', status: 'PASS', evidence: 'Fixture contract requires rejecting invalid parser input', scope: 'Contract inspection only; no implementation tested' }, { id: 'AC2', status: 'PASS', evidence: 'Audit only, no source edits', scope: 'Owned fixture reads and native task controls only' }], risks: [] }); return;
     }
     assert.equal(options.provider, 'openai-codex'); assert.equal(options.model, 'gpt-6.1-sol');
     if (!state.run) { yield* response('mentor_begin', { mode: 'collaborative', task_kind: 'overview', task: 'Native Agent Teams overview fixture, three disjoint investigations' }); return; }
     assert.equal(state.run.backend, 'team');
     if (state.tasks.length < 3) {
       const index = state.tasks.length;
-      yield* response('mentor_delegate', { name: ['flash-a', 'flash-b', 'flash-c'][index], reasoning_effort: ['high', 'low', 'default'][index], goal: 'Independent read-only contract inspection ' + index, write_scope: [], acceptance: 'AC1 contract rejects invalid input; AC2 audit performs no writes' }); return;
+      yield* response('mentor_delegate', { name: ['flash-a', 'flash-b', 'flash-c'][index], reasoning_effort: ['high', 'low', 'default'][index], goal: 'Independent read-only contract inspection ' + index, write_scope: [], acceptance: 'AC1 contract rejects invalid input; AC2 audit performs no writes', criteria: [{ id: 'AC1', description: 'Contract specifies invalid parser input rejection' }, { id: 'AC2', description: 'Audit performs no source writes' }] }); return;
     }
     this.releaseStaffing();
     if (!this.rosterRead) { this.rosterRead = true; yield* response('list_agents', {}); return; }
@@ -148,6 +148,9 @@ test('native Agent Teams pins Flash/effort, claims tasks, tutors/corrects report
       const calls = adapter.calls.filter(call => call.sessionId === task.childId); assert.ok(calls.length > 0);
       assert.ok(calls.every(call => call.model === 'deepseek-flash' && call.provider === 'deepseek-official' && call.reasoningEffort === (task.teamName === 'flash-a' ? 'high' : 'low')));
       assert.equal(task.route.reasoningEffort, task.teamName === 'flash-a' ? 'high' : 'low');
+      assert.deepEqual(task.criteria.map(({ id }) => id), ['AC1', 'AC2']);
+      assert.deepEqual(task.report.evidenceGate.criteria.map(({ id, status }) => ({ id, status })), [{ id: 'AC1', status: 'PASS' }, { id: 'AC2', status: 'PASS' }]);
+      assert.deepEqual(task.review.assessments.map(({ criterion }) => criterion), ['AC1', 'AC2']);
       assert.equal(task.review.reportReliable, true); assert.equal(task.review.assessments.length, 2); assert.ok(task.review.assessments.every(item => item.criterionSatisfied));
       assert.ok(trace.some(({ sessionId, event }) => sessionId === task.childId && event.type === 'tool/call' && event.data.name === 'team_task_update' && JSON.parse(event.data.arguments).action === 'claim'));
       assert.ok(trace.some(({ sessionId, event }) => sessionId === task.childId && event.type === 'tool/result' && event.data.meta?.codexMentor?.kind === 'report'));
@@ -163,6 +166,7 @@ test('native Agent Teams pins Flash/effort, claims tasks, tutors/corrects report
     assert.deepEqual(view(handle.agent.session.snapshotEvents().reduce(fold, initial(handle.agent.session.header))), view(actual));
     const finals = handle.agent.session.snapshotEvents().filter(event => event.type === 'assistant/message').map(event => event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join(''));
     assert.equal(finals.filter(text => text === FINAL).length, 1);
+    assert.equal(adapter.calls.filter(call => call.model === 'deepseek-flash').length, 16, 'Three native get/claim/read/report sequences plus blocked guidance and reopened report correction; no extra inference on submission or acceptance');
     const callsBefore = adapter.calls.length;
     await handle.dispose();
     const resumed = await ctx.agents.resume({ resumeSessionId: 'native-flash-team-mentor', setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'codex-mentor'); } });

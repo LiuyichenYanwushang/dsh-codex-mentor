@@ -1,6 +1,6 @@
 - insert:
     - id: codex-mentor-host
-      name: './host-0.6.1.js'
+      name: './host-0.7.0.js'
       config:
         workerProvider: auto
         workerModel: deepseek-flash

@@ -55,11 +55,11 @@ class ScriptedAdapter extends LlmAdapter {
       const task = state.tasks[0]; assert.ok(task, 'assignment admitted before worker model call');
       if (step === 0) return response('read', { file_path: fixture });
       if (task.goal.endsWith('A') && !task.guidance) return response('mentor_report', { task_id: task.taskId, status: 'blocked', summary: 'Need contract decision', evidence: 'Read fixture AC1 and AC2', attempts: 'Inspected fixture; invalid-input behavior remains unspecified for this scenario', question: 'Should invalid input be rejected?' });
-      return response('mentor_report', { task_id: task.taskId, status: 'ready-review', summary: 'Read-only audit completed', evidence: 'Read fixture; no source changes', changes: [], checks: ['read contract fixture: AC1/AC2 inspected'], criteria: ['AC1: PASS; reject invalid input', 'AC2: PASS; no writes'], risks: [] });
+      return response('mentor_report', { task_id: task.taskId, status: 'ready-review', summary: 'Read-only audit completed', evidence: 'Read fixture; no source changes', changes: [], checks: ['read contract fixture: AC1/AC2 inspected'], criteria: [{ id: 'AC1', status: 'PASS', evidence: 'Fixture requires rejecting invalid input', scope: 'Contract inspection only; no implementation tested' }, { id: 'AC2', status: 'PASS', evidence: 'No source changes; only fixture read', scope: 'Read-only fixture audit, no production project inspected' }], risks: [] });
     }
     assert.ok(names.includes('mentor_begin')); assert.ok(names.includes('mentor_verify'));
     if (!state.run) return response('mentor_begin', { mode: 'collaborative', task: 'Two independent read-only audit investigations' });
-    if (state.tasks.length < 2) return response('mentor_delegate', { goal: `Independent read-only audit ${state.tasks.length ? 'B' : 'A'}`, write_scope: [], acceptance: 'AC1 reject invalid input; AC2 no source edits' });
+    if (state.tasks.length < 2) return response('mentor_delegate', { goal: `Independent read-only audit ${state.tasks.length ? 'B' : 'A'}`, write_scope: [], acceptance: 'AC1 reject invalid input; AC2 no source edits', criteria: [{ id: 'AC1', description: 'Reject invalid input as specified by the fixture contract' }, { id: 'AC2', description: 'Audit only; no source edits' }] });
     const blocked = state.tasks.find(task => task.status === 'blocked');
     if (blocked) return response('mentor_guide', { task_id: blocked.taskId, diagnosis: 'Hypothesis: the fixture establishes rejection', next_steps: 'Check AC1 in the fixture; do not edit project source', validation: 'AC1 explicitly requires rejecting invalid input', fallback: 'Report conflicting contract text instead of guessing' });
     const ready = state.tasks.find(task => task.status === 'ready-review');
@@ -123,6 +123,27 @@ test('selecting the already-mounted mentor preset preserves its actual tools', a
   } finally { await ctx.fiber.dispose(); }
 });
 
+test('native tool failure renders structured acceptance diagnostics and replay retains the submitted report', async () => {
+  const ctx = await kernel();
+  try {
+    const handle = await ctx.agents.create({ sessionId: 'native-acceptance-diagnostic-fixture', agentOptions: { provider: 'openai-codex', model: 'gpt-6.1-sol' }, setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'codex-mentor'); } });
+    // SDK boundary fixture, not a real worker, independent check, or external inference.
+    const record = { version: 1, kind: 'delegated', id: 'fixture-assignment', taskId: 'fixture-task', childId: 'fixture-child', started: true, writeScope: [], criteria: [{ id: 'A', description: 'Bounded source overview' }] };
+    handle.agent.inject(createUserMessage({ source: { kind: 'codex-mentor-ledger', record }, content: [] }));
+    handle.agent.inject(createUserMessage({ source: { kind: 'codex-mentor-ledger', record: { version: 1, kind: 'report', id: 'fixture-report', childId: 'fixture-child', taskId: 'fixture-task', status: 'ready-review', summary: 'Delivered fixture', evidence: 'SDK fixture only', evidenceGate: { changes: [], checks: [], criteria: [{ id: 'A', status: 'PASS', evidence: 'Synthetic fixture', scope: 'No execution claimed' }], deviations: [], assumptions: [], risks: [] } } }, content: [] }));
+    const failure = await ctx.tools.execute({ callId: randomUUID(), name: 'mentor_review', arguments: { task_id: 'fixture-task', verdict: 'accepted', report_reliable: true, evidence: 'Cannot endorse missing assertions', verification_ids: [], assessments: [] }, agent: handle.agent, signal: new AbortController().signal });
+    assert.equal(failure.isError, true);
+    const diagnostic = JSON.parse(failure.content.find(block => block.type === 'text').text);
+    assert.equal(diagnostic.code, 'ASSESSMENT_MISSING'); assert.equal(diagnostic.criterion_id, 'A'); assert.ok(diagnostic.required_action);
+    const current = stateOf(ctx, handle.agent).tasks[0];
+    assert.equal(current.status, 'acceptance_blocked'); assert.equal(current.report.id, 'fixture-report');
+    assert.equal(current.acceptanceBlock.diagnostic.code, 'ASSESSMENT_MISSING');
+    const replay = handle.agent.session.snapshotEvents().reduce(fold, initial(handle.agent.session.header));
+    assert.deepEqual(replay.tasks, stateOf(ctx, handle.agent).tasks, 'diagnosis is a recoverable journal fact');
+    await handle.dispose();
+  } finally { await ctx.fiber.dispose(); }
+});
+
 test('activating the Host after a mentor session exists repairs its actual tool surface', async () => {
   const ctx = await kernel(false);
   try {
@@ -162,6 +183,11 @@ test('native two-worker audit performs blocked guidance, real checks, independen
     const actual = stateOf(ctx, handle.agent), facts = cooperation(actual);
     assert.equal(facts.delegated, 2); assert.equal(facts.accepted, 2); assert.equal(facts.guidance, 1);
     assert.equal(facts.independentChecks, 2); assert.equal(facts.outstanding.length, 0);
+    for (const task of actual.tasks) {
+      assert.deepEqual(task.criteria.map(({ id }) => id), ['AC1', 'AC2']);
+      assert.deepEqual(task.report.evidenceGate.criteria.map(({ id, status }) => ({ id, status })), [{ id: 'AC1', status: 'PASS' }, { id: 'AC2', status: 'PASS' }]);
+      assert.deepEqual(task.review.assessments.map(({ criterion }) => criterion), ['AC1', 'AC2']);
+    }
     assert.equal(readActors.filter(id => id === handle.agent.id).length, 2, 'mentor really ran two independent checks');
     assert.equal(new Set(adapter.calls.filter(call => call.model === 'deepseek-flash').map(call => call.sessionId)).size, 2);
     assert.ok(adapter.calls.every(call => call.model === (call.provider === 'openai-codex' ? 'gpt-6.1-sol' : 'deepseek-flash')));

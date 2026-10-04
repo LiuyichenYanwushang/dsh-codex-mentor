@@ -26,10 +26,12 @@ test('requeued user input cannot replace the parent run; a genuinely new input a
   assert.equal(h.state(mentor).run.task, original.task);
   h.append(mentor, 'user/message', { ...input, id: 'input-2' });
   const status = await h.call(mentor, 'mentor_status', {});
-  assert.equal(status.activeRun, null);
-  assert.equal(status.lastCompletedRun.runId, original.runId);
-  assert.equal(status.recentTaskSummaries.length, 2);
-  assert.equal(status.lastRunCooperation.delegated, 2);
+  assert.equal(status.run, null); assert.equal(Object.hasOwn(status, 'activeRun'), false);
+  assert.equal(status.tasks.length, 2);
+  const history = await h.call(mentor, 'mentor_status', { detail: 'history' });
+  assert.equal(history.lastCompletedRun.runId, original.runId);
+  assert.equal(history.recentTasks.length, 2);
+  assert.equal(history.lastRunCooperation.delegated, 2);
   await h.call(mentor, 'mentor_begin', { mode: 'collaborative', task: 'New request B' });
   const newerRun = h.state(mentor).run.runId;
   h.append(mentor, 'agent/inbox/spliced', { inserted: [input] });
@@ -77,26 +79,27 @@ test('a native stop without a report stays incomplete; only proven successful re
   assert.deepEqual(decision, { kind: 'enter', messages: [] });
   const failure = { ...message, source: { ...message.source, summary: 'worker failed before it finished' } };
   decision = await mentor.localHandlers.get('agent/pre-step')({ messages: [failure] }, async () => ({ kind: 'enter', messages: [failure] }));
-  assert.equal(decision.messages[0], failure, 'real failure is never hidden by accepted/cancelled state');
+  assert.match(decision.messages[0].content[0].text, /worker failed before it finished/, 'real failure detail is not hidden');
+  assert.match(decision.messages[0].content[0].text, /cancelled/, 'explicit cancellation is retained separately');
 });
 
 test('successful log reading requires a semantic assertion; old read-only evidence is reusable only for unchanged named inputs', async () => {
   const h = harness(), mentor = await h.makeAgent('m');
-  const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Inspect', write_scope: [], acceptance: 'A1: required result' });
+  const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Inspect', write_scope: [], acceptance: 'A1: required result', criteria: [{ id: 'A1', description: 'Required result' }] });
   const worker = h.agents.get(record.childId);
   let digest = 'a'.repeat(64), executions = 0;
   h.ctx.tools.execute = async input => input.name === 'bash' ? { isError: false, value: { kind: 'foreground', exitCode: 0, stdout: { truncated: false, text: JSON.stringify([{ path: 'contract.txt', sha256: digest }]) } } } : (++executions, { isError: false, value: { text: 'required result observed' } });
   const check = await h.call(mentor, 'mentor_verify', { task_id: record.taskId, tool: 'read', arguments: { file_path: 'contract.txt' }, input_paths: ['contract.txt'], kind: 'historical-log', label: 'A1' });
   assert.equal(check.executionSucceeded, true); assert.equal(check.criterionSatisfied, null);
-  await h.call(worker, 'mentor_report', { task_id: record.taskId, status: 'ready-review', summary: 'Inspected', evidence: 'contract.txt', changes: [], checks: [], criteria: ['A1: PASS; invalid input emits FAIL as required'], risks: [] });
+  await h.call(worker, 'mentor_report', { task_id: record.taskId, status: 'ready-review', summary: 'Inspected', evidence: 'contract.txt', changes: [], checks: [], criteria: [{ id: 'A1', status: 'PASS', evidence: 'invalid input emits FAIL as required', scope: 'read-only contract' }], risks: [] });
   const review = { task_id: record.taskId, verdict: 'accepted', verification_ids: [check.checkId], evidence: 'interpreted execution', report_reliable: true, assessments: [{ criterion: 'A1', passed: false, expected: 'required result', observed: 'failure in a successfully read log', interpretation: 'reading success is not a passed result', scope: 'contract.txt only', verification_ids: [check.checkId] }] };
-  await assert.rejects(h.call(mentor, 'mentor_review', review, true), /interpreted assertion/);
-  await assert.rejects(h.call(mentor, 'mentor_review', { ...review, assessments: undefined }, true), /explicit assertions/);
+  await assert.rejects(h.call(mentor, 'mentor_review', review, true), /CRITERION_ASSERTION_FAILED/);
+  await assert.rejects(h.call(mentor, 'mentor_review', { ...review, assessments: undefined }, true), /ASSESSMENTS_REQUIRED/);
   review.assessments[0].passed = true;
   review.assessments[0].observed = 'required result observed';
   review.assessments[0].interpretation = 'observed equals the named requirement';
   digest = 'b'.repeat(64);
-  await assert.rejects(h.call(mentor, 'mentor_review', review, true), /unchanged fingerprinted/);
+  await assert.rejects(h.call(mentor, 'mentor_review', review, true), /INPUTS_CHANGED/);
   digest = 'a'.repeat(64);
   await h.call(mentor, 'mentor_review', review, true);
   assert.equal(executions, 1, 'the inspection itself was not rerun just because the report came later');
@@ -173,7 +176,7 @@ function harness(overrides = {}) {
   async function call(agent, name, args, raw = false) {
     if (!raw && name === 'mentor_review' && args.verdict === 'accepted' && args.verification_ids?.length) {
       const report = agent.session.states[KEY].tasks.find(task => task.taskId === args.task_id)?.report;
-      args = { report_reliable: true, assessments: report?.evidenceGate.criteria.map(item => ({ criterion: item.split(':')[0].trim(), passed: true, expected: 'fixture requirement', observed: 'fixture independently inspected', interpretation: 'observed fixture matches the requirement', scope: 'only the fixture, not production', verification_ids: args.verification_ids })), ...args };
+      args = { report_reliable: true, assessments: report?.evidenceGate.criteria.map(item => ({ criterion: typeof item === 'string' ? item.split(/[:：]/)[0].trim() : item.id, passed: true, expected: 'fixture requirement', observed: 'fixture independently inspected', interpretation: 'observed fixture matches the requirement', scope: 'only the fixture, not production', verification_ids: args.verification_ids })), ...args };
     }
     const definition = tools.get(agent.id).get(name); assert.ok(definition, `${name} visible to ${agent.id}`);
     const callId = 'call-' + (++n);
@@ -205,8 +208,8 @@ test('mentor -> blocked worker -> concrete guidance -> ready-review -> acceptanc
   assert.equal(h.state(mentor).tasks[0].status, 'blocked');
   await h.call(mentor, 'mentor_guide', { task_id: taskId, diagnosis: 'Hypothesis: caller expects rejection', next_steps: 'Add an explicit empty-input check', validation: 'Invalid-input test passes', fallback: 'Report caller evidence if it expects empty output' });
   assert.equal(h.state(worker).tasks[0].guidance.validation, 'Invalid-input test passes');
-  await h.call(worker, 'mentor_report', { task_id: taskId, status: 'ready-review', summary: 'Check added', evidence: 'node --test parser.test.js: PASS', changes: ['src/parser.js'], checks: ['node --test parser.test.js: PASS'], criteria: ['AC1: PASS; invalid-input test'], risks: [] });
-  await assert.rejects(h.call(mentor, 'mentor_review', { task_id: taskId, verdict: 'accepted', evidence: 'Merely repeated worker result' }), /actual successful mentor_verify/);
+  await h.call(worker, 'mentor_report', { task_id: taskId, status: 'ready-review', summary: 'Check added', evidence: 'node --test parser.test.js: PASS', changes: ['src/parser.js'], checks: ['node --test parser.test.js: PASS'], criteria: [{ id: 'AC1', status: 'PASS', evidence: 'invalid-input test', scope: 'fixture parser only' }], risks: [] });
+  await assert.rejects(h.call(mentor, 'mentor_review', { task_id: taskId, verdict: 'accepted', evidence: 'Merely repeated worker result' }), /REPORT_RELIABILITY_UNCONFIRMED/);
   const check = await h.call(mentor, 'mentor_verify', { task_id: taskId, tool: 'read', arguments: { file_path: 'src/parser.js' }, label: 'Independent contract check' });
   await h.call(mentor, 'mentor_review', { task_id: taskId, verdict: 'accepted', verification_ids: [check.checkId], evidence: 'Reviewed diff; reran parser test: PASS' });
   assert.equal(h.state(mentor).tasks[0].status, 'accepted');
@@ -349,19 +352,19 @@ test('direct execution needs a native consent answer, not a model assertion', as
 test('failed or stale independent checks cannot accept a worker claim', async () => {
   const h = harness(), mentor = await h.makeAgent('m');
   const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Read-only audit', write_scope: [], acceptance: 'AC1 correct' });
-  const worker = h.agents.get(record.childId), report = { task_id: record.taskId, status: 'ready-review', summary: 'Audit done', evidence: 'fixture read', changes: [], checks: ['fixture read'], criteria: ['AC1: PASS'], risks: [] };
+  const worker = h.agents.get(record.childId), report = { task_id: record.taskId, status: 'ready-review', summary: 'Audit done', evidence: 'fixture read', changes: [], checks: ['fixture read'], criteria: [{ id: 'AC1', status: 'PASS', evidence: 'fixture read', scope: 'read-only fixture' }], risks: [] };
   await h.call(worker, 'mentor_report', report);
   h.ctx.tools.execute = async () => ({ isError: false, value: { exitCode: 1, output: 'FAIL' }, content: [] });
   const failed = await h.call(mentor, 'mentor_verify', { task_id: record.taskId, tool: 'bash', arguments: { command: 'test fixture' }, label: 'actual failing check' });
-  await assert.rejects(h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'accepted', evidence: 'trust me', verification_ids: [failed.checkId] }), /actual successful/);
+  await assert.rejects(h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'accepted', evidence: 'trust me', verification_ids: [failed.checkId] }), /VERIFICATION_FAILED|VERIFICATION_RUNNING/);
   h.ctx.tools.execute = async () => ({ isError: false, value: { kind: 'promoted', jobId: 'still-running' }, content: [] });
   const running = await h.call(mentor, 'mentor_verify', { task_id: record.taskId, tool: 'bash', arguments: {}, label: 'unfinished background job' });
-  await assert.rejects(h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'accepted', evidence: 'job started', verification_ids: [running.checkId] }), /actual successful/);
+  await assert.rejects(h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'accepted', evidence: 'job started', verification_ids: [running.checkId] }), /VERIFICATION_FAILED|VERIFICATION_RUNNING/);
   h.ctx.tools.execute = async () => ({ isError: false, value: { text: 'fixture checked' }, content: [] });
   const old = await h.call(mentor, 'mentor_verify', { task_id: record.taskId, tool: 'read', arguments: {}, label: 'first revision' });
   await h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'rework', evidence: 'Check a revised contract' });
   await h.call(worker, 'mentor_report', report);
-  await assert.rejects(h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'accepted', evidence: 'reuse old check', verification_ids: [old.checkId] }), /latest ready-review/);
+  await assert.rejects(h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'accepted', evidence: 'reuse old check', verification_ids: [old.checkId] }), /EVIDENCE_NOT_REUSABLE/);
 });
 
 test('continue-generating resumes only the original stopped task and fences replayed failure notices', async () => {
@@ -387,7 +390,7 @@ test('continue-generating resumes only the original stopped task and fences repl
   h.append(mentor, 'user/message', failure);
   assert.equal(h.state(mentor).tasks[0].status, 'resuming', 'old failure replay cannot undo a fresh continuation request');
   await assert.rejects(h.call(mentor, 'mentor_resume', { task_id: record.taskId }), /duplicate/);
-  await assert.rejects(h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'accepted', evidence: 'just resumed' }), /formal ready-review/);
+  await assert.rejects(h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'accepted', evidence: 'just resumed' }), /REPORT_REQUIRED/);
   await h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'cancelled', evidence: 'fixture end' });
   await assert.rejects(h.call(mentor, 'mentor_resume', { task_id: record.taskId }), /Closed/);
 });
@@ -419,6 +422,86 @@ test('concurrent continuation requests have only one accepted delivery', async (
   await assert.rejects(h.call(mentor, 'mentor_resume', { task_id: record.taskId }), /duplicate/);
   release(); assert.equal((await pending).outcome, 'requested');
   assert.equal(h.state(mentor).tasks[0].guidanceCount, 1);
+});
+
+test('fixed criteria diagnose the precise missing assessment, retain submission, and accept only a corrected interpretation', async () => {
+  const h = harness(), mentor = await h.makeAgent('protocol-parent');
+  const criteria = ['A', 'B', 'C'].map(id => ({ id, description: `Bounded source overview ${id}` }));
+  const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Project overview', write_scope: [], acceptance: 'Sourced overview, not underlying theorem correctness', criteria });
+  const worker = h.agents.get(record.childId);
+  const report = { task_id: record.taskId, status: 'ready-review', summary: 'Bounded sourced overview', evidence: 'fixture only; no tests asserted', changes: [], checks: [], criteria: criteria.map(({ id }) => ({ id, status: 'PASS', evidence: `Fixture source ${id}`, scope: 'Attribution and current scope only' })), risks: [] };
+  await assert.rejects(h.call(worker, 'mentor_report', { ...report, criteria: [...report.criteria, { id: 'Rework', status: 'PASS', evidence: 'corrected text', scope: 'history' }] }), error => error.diagnostic?.code === 'CRITERION_UNKNOWN' && error.diagnostic.criterion_id === 'Rework');
+  await h.call(worker, 'mentor_report', report);
+  const first = await h.call(mentor, 'mentor_verify', { task_id: record.taskId, tool: 'read', arguments: { file_path: 'fixture' }, label: 'Attribution and boundary' });
+  const assessment = id => ({ criterion: id, passed: true, expected: 'Accurate source attribution', observed: 'Source attribution read independently', interpretation: 'Overview is reliable within stated boundaries, not theorem verification', scope: 'Scripted fixture only', verification_ids: [first.checkId] });
+  const review = { task_id: record.taskId, verdict: 'accepted', report_reliable: true, verification_ids: [first.checkId], evidence: 'Independent source inspection', assessments: [assessment('A'), assessment('B')] };
+  await assert.rejects(h.call(mentor, 'mentor_review', review, true), error => error.diagnostic?.code === 'ASSESSMENT_MISSING' && error.diagnostic.criterion_id === 'C' && !!error.diagnostic.required_action);
+  const current = h.state(mentor).tasks[0], reportId = current.report.id;
+  assert.equal(current.status, 'acceptance_blocked');
+  const compact = await h.call(mentor, 'mentor_status', { task_id: record.taskId });
+  assert.equal(compact.tasks[0].report.state, 'submitted'); assert.equal(compact.tasks[0].report.id, reportId);
+  assert.equal(compact.tasks[0].acceptance.diagnostic.criterion_id, 'C');
+  assert.equal(Object.hasOwn(compact.tasks[0].report, 'evidenceGate'), false);
+  const later = await h.call(mentor, 'mentor_verify', { task_id: record.taskId, tool: 'read', arguments: { file_path: 'fixture' }, label: 'Purposeful check while acceptance blocked' });
+  assert.equal(later.record.readyReportId, reportId, 'blocked acceptance does not erase current-report binding');
+  await assert.rejects(h.call(mentor, 'mentor_review', { ...review, assessments: [assessment('A: whole title'), assessment('B'), assessment('C')] }, true), error => error.diagnostic?.code === 'ASSESSMENT_UNKNOWN' && error.diagnostic.criterion_id === 'A: whole title');
+  await h.call(mentor, 'mentor_review', { ...review, assessments: criteria.map(({ id }) => assessment(id)) }, true);
+  assert.equal(h.state(mentor).tasks[0].status, 'accepted');
+});
+
+test('acceptance-blocked submission can close unaccepted and native failure still acknowledges its report', async () => {
+  const h = harness(), mentor = await h.makeAgent('blocked-close-parent');
+  const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Inspect', write_scope: [], acceptance: 'Bounded fixture' });
+  const worker = h.agents.get(record.childId);
+  await h.call(worker, 'mentor_report', { task_id: record.taskId, status: 'ready-review', summary: 'Delivered', evidence: 'fixture', changes: [], checks: [], criteria: [{ id: 'AC1', status: 'UNVERIFIED', evidence: 'Source unavailable', scope: 'No claim of verification' }], risks: [] });
+  await assert.rejects(h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'accepted', report_reliable: true, evidence: 'Cannot accept' }, true), error => error.diagnostic?.code === 'CRITERION_NOT_PASSED' && error.diagnostic.criterion_id === 'AC1');
+  const originalReportId = h.state(mentor).tasks[0].report.id;
+  await h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'closed-unaccepted', evidence: 'Submission delivered; acceptance blocked; no guessing or new tests' });
+  const stopped = { id: 'closed-native-stop', source: { kind: 'subagent-settled', senderSessionId: record.childId, summary: 'worker failed before it finished. It left no closing message.' }, content: [{ type: 'text', text: 'no closing message' }] };
+  h.append(mentor, 'user/message', stopped);
+  const decision = await mentor.localHandlers.get('agent/pre-step')({ messages: [stopped] }, async () => ({ kind: 'enter', messages: [stopped], startsRequestSeries: true }));
+  assert.equal(decision.startsRequestSeries, true);
+  assert.match(decision.messages[0].content[0].text, /was SUBMITTED/); assert.match(decision.messages[0].content[0].text, /closed-unaccepted/);
+  const task = h.state(mentor).tasks[0]; assert.equal(task.status, 'closed-unaccepted'); assert.equal(task.report.id, originalReportId);
+  assert.equal(cooperation(h.state(mentor)).accepted, 0); assert.equal(cooperation(h.state(mentor)).cancelled, 0); assert.equal(cooperation(h.state(mentor)).closedUnaccepted, 1);
+  assert.equal(task.review.reportReliable, false);
+  const previous = task.report;
+  const working = { ...task, status: 'stopped', report: { id: 'later-progress', status: 'progress' }, lastSubmittedReport: previous };
+  const facts = (await import('../protocol.js')).taskSummary(working);
+  assert.equal(facts.execution.stoppedWithoutReport, false, 'a rework progress notice cannot erase the earlier submission');
+  assert.equal(facts.report.id, originalReportId); assert.equal(facts.report.latestUpdateStatus, 'progress');
+  assert.throws(() => encode({ kind: 'report', payload: 'x'.repeat(24000) }), error => error.diagnostic?.code === 'MESSAGE_TOO_LARGE');
+});
+
+test('overview checks require a new uncertainty after four; output previews have one retrievable complete body', async () => {
+  const h = harness(), mentor = await h.makeAgent('overview-parent');
+  await h.call(mentor, 'mentor_begin', { task: 'Sourced overview', mode: 'collaborative', task_kind: 'overview' });
+  const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Bounded overview', write_scope: [], acceptance: 'Bounded attributed sources' });
+  let executions = 0;
+  h.ctx.tools.execute = async () => { executions++; return { isError: false, value: { text: 'source'.repeat(2000) } }; };
+  for (let i = 0; i < 4; i++) await h.call(mentor, 'mentor_verify', { task_id: record.taskId, tool: 'read', arguments: {}, label: `Purpose ${i}` });
+  await assert.rejects(h.call(mentor, 'mentor_verify', { task_id: record.taskId, tool: 'read', arguments: {}, label: 'Blind repeated read' }), error => error.diagnostic?.code === 'OVERVIEW_CHECK_BUDGET');
+  assert.equal(executions, 4, 'rejection occurs before native execution');
+  const fifth = await h.call(mentor, 'mentor_verify', { task_id: record.taskId, tool: 'read', arguments: {}, label: 'Different uncertainty', incremental_reason: 'Newer source must be checked for resolution of the blocker' });
+  assert.equal(executions, 5); assert.ok(fifth.record.output.length > 6000, 'saved native output is not silently cut at 6000');
+  const rendered = JSON.parse(h.tools.get(mentor.id).get('mentor_verify').output.render({}, fifth)[0].text);
+  assert.equal(Object.hasOwn(rendered, 'record'), false); assert.equal(Object.hasOwn(rendered, 'actualResult'), false); assert.ok(rendered.output.length <= 3000); assert.equal(rendered.outputTruncated, true);
+  const expanded = await h.call(mentor, 'mentor_status', rendered.fullEvidence);
+  assert.equal(expanded.check.output, fifth.record.output);
+  const compact = await h.call(mentor, 'mentor_status', { task_id: record.taskId });
+  assert.ok(JSON.stringify(compact).length < 5000); assert.equal(JSON.stringify(compact).includes('sourcesourcesourcesource'), false);
+  const notice = { source: { kind: 'codex-mentor-ledger' }, content: [{ type: 'text', text: 'duplicate self update' }] };
+  const decision = await mentor.localHandlers.get('agent/pre-step')({ messages: [notice] }, async () => ({ kind: 'enter', messages: [notice], startsRequestSeries: true }));
+  assert.deepEqual(decision.messages, []); assert.equal(decision.startsRequestSeries, true);
+});
+
+test('legacy missing PASS returns the exact criterion rather than the old generic refusal', async () => {
+  const h = harness(), mentor = await h.makeAgent('legacy-parent');
+  h.append(mentor, 'user/message', { source: { kind: 'codex-mentor-ledger', record: { version: 1, kind: 'delegated', taskId: 'legacy-task', childId: 'legacy-child', runId: 'legacy-run', goal: 'Legacy overview', writeScope: [], started: true } }, content: [] });
+  const report = { version: 1, kind: 'report', id: 'legacy-report', taskId: 'legacy-task', status: 'ready-review', summary: 'Final format', evidence: 'sourced overview', evidenceGate: { changes: [], checks: [], criteria: ['A: 项目定位、入口、依赖与模块概览', 'B: 当前范围', 'C: 验证局限'], deviations: [], assumptions: [], risks: [] } };
+  h.append(mentor, 'user/message', { source: { kind: 'agent-message', form: 'relay', senderSessionId: 'legacy-child' }, content: [{ type: 'text', text: encode(report) }] });
+  await assert.rejects(h.call(mentor, 'mentor_review', { task_id: 'legacy-task', verdict: 'accepted', report_reliable: true, evidence: 'Three latest-report reads completed', verification_ids: [] }, true), error => error.diagnostic?.code === 'CRITERION_NOT_PASSED' && error.diagnostic.criterion_id === 'A' && error.diagnostic.worker_status === 'UNVERIFIED');
+  assert.equal(h.state(mentor).tasks[0].status, 'acceptance_blocked'); assert.equal(h.state(mentor).tasks[0].report.id, 'legacy-report');
 });
 
 test('native Team queued recovery stays provisional and preserves original member identity', async () => {
