@@ -1,12 +1,12 @@
-import { TERMINAL } from './ledger.js?mentor=0.6.0';
-export { DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './ledger.js?mentor=0.6.0';
+import { TERMINAL } from './ledger.js?mentor=0.6.1';
+export { DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './ledger.js?mentor=0.6.1';
 
 export function effectiveCapabilities(writeScope) {
   const writable = writeScope.length > 0;
   return { fileRead: true, fileWrite: writable, shell: writable, tests: writable, formalReport: true, network: 'subject-to-native-policy', limits: 'Assignment tool policy only; native tool availability, filesystem access and sandbox restrictions still apply. Empty write_scope disables ALL shell, including Git and tests.' };
 }
 
-export const MENTOR_TOOLS = ['mentor_begin', 'mentor_status', 'mentor_wait', 'mentor_delegate', 'mentor_guide', 'mentor_verify', 'mentor_review', 'mentor_memory'];
+export const MENTOR_TOOLS = ['mentor_begin', 'mentor_status', 'mentor_wait', 'mentor_delegate', 'mentor_guide', 'mentor_resume', 'mentor_verify', 'mentor_review', 'mentor_memory'];
 export const WORKER_TOOLS = ['mentor_status', 'mentor_report', 'mentor_memory'];
 export const BYPASS = ['subagent', 'subagent_fork', 'workflow', 'spawn_teammate', 'interrupt_agent', 'list_agents', 'send_message', 'team_task_create', 'team_task_update', 'team_task_get', 'team_task_list', 'list_teammates', 'wait_agent'];
 

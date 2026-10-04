@@ -1,7 +1,7 @@
 export const KEY = 'codexMentor';
 export const PRESET = 'codex-mentor';
 export const PREFIX = 'CODEX_MENTOR/1\n';
-export const MUTATIONS = ['mentor_begin', 'mentor_verify', 'mentor_delegate', 'mentor_report', 'mentor_guide', 'mentor_review', 'mentor_memory'];
+export const MUTATIONS = ['mentor_begin', 'mentor_verify', 'mentor_delegate', 'mentor_report', 'mentor_guide', 'mentor_resume', 'mentor_review', 'mentor_memory'];
 export const DIRECT_QUESTION_ID = 'codex-mentor-direct';
 export const DIRECT_LABEL = '本次直接执行';
 export const INSPECTION_TOOLS = ['read', 'read_image', 'glob', 'grep', 'bash', 'web_search', 'web_fetch'];
@@ -95,7 +95,7 @@ function update(state, record, seq) {
       task = { ...previous, status: record.id && (previous.guidance?.reportId === record.id || (previous.review?.verdict === 'rework' && previous.review.reportId === record.id)) ? previous.status : record.status, report: record, awaitingSettlements: ['blocked', 'ready-review'].includes(record.status) ? [...(previous.awaitingSettlements ?? []), record.id ?? `report-${seq}`] : previous.awaitingSettlements ?? [], seq }; break;
     case 'verify': task = { ...previous, verifications: [...(previous.verifications ?? []), { ...record, seq }].slice(-32), seq }; break;
     case 'stopped': task = { ...previous, status: 'stopped', lastStop: record, seq }; break;
-    case 'guidance': task = { ...previous, status: record.reportId && previous.report?.id && record.reportId !== previous.report.id ? previous.status : 'implementing', guidance: record, guidanceCount: (previous.guidanceCount ?? 0) + 1, guidanceKinds: { ...(previous.guidanceKinds ?? {}), [record.purpose ?? 'task-guidance']: (previous.guidanceKinds?.[record.purpose ?? 'task-guidance'] ?? 0) + 1 }, seq }; break;
+    case 'guidance': task = { ...previous, status: (Object.hasOwn(record, 'reportId') && previous.report?.id && record.reportId !== previous.report.id) || (record.recovery && previous.lastStop?.nativeMessageId && record.recovery.stopId !== previous.lastStop.nativeMessageId) ? previous.status : record.recovery ? 'resuming' : 'implementing', guidance: record, guidanceCount: (previous.guidanceCount ?? 0) + 1, guidanceKinds: { ...(previous.guidanceKinds ?? {}), [record.purpose ?? 'task-guidance']: (previous.guidanceKinds?.[record.purpose ?? 'task-guidance'] ?? 0) + 1 }, seq }; break;
     case 'review': task = { ...previous, status: record.verdict === 'rework' ? 'implementing' : record.verdict, review: record, reworkCount: (previous.reworkCount ?? 0) + (record.verdict === 'rework' ? 1 : 0), seq }; break;
     default: return state;
   }
@@ -150,13 +150,13 @@ export function fold(state, event) {
   }
   if (!state.parentId && message.source?.kind === 'subagent-settled') {
     const task = state.tasks.find(item => item.childId === message.source.senderSessionId);
-    if (!task || (message.id && task.handledSettlements?.includes(message.id))) return state;
+    if (!task || (message.id && (task.handledSettlements?.includes(message.id) || task.lastStop?.nativeMessageId === message.id))) return state;
     const successful = message.source.summary === `Background subagent ${task.childId} finished and will do no further work unless you send it more.`;
     if (successful && task.awaitingSettlements?.length) {
       return { ...state, tasks: state.tasks.map(item => item === task ? { ...task, awaitingSettlements: task.awaitingSettlements.slice(1), handledSettlements: message.id ? [...(task.handledSettlements ?? []), message.id].slice(-32) : task.handledSettlements ?? [] } : item) };
     }
     if ([...TERMINAL, 'blocked', 'ready-review'].includes(task.status)) return state;
-    return update(state, { version: 1, kind: 'stopped', taskId: task.taskId, summary: 'Worker stopped without a reviewable report', nativeSummary: message.source.summary }, event.seq);
+    return update(state, { version: 1, kind: 'stopped', taskId: task.taskId, summary: 'Worker stopped without a reviewable report', nativeMessageId: message.id ?? null, nativeSummary: message.source.summary }, event.seq);
   }
   if (message.source?.kind === 'codex-mentor-ledger') return update(state, message.source.record, event.seq);
   const record = decode(message.content);

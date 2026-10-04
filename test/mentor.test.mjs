@@ -363,3 +363,80 @@ test('failed or stale independent checks cannot accept a worker claim', async ()
   await h.call(worker, 'mentor_report', report);
   await assert.rejects(h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'accepted', evidence: 'reuse old check', verification_ids: [old.checkId] }), /latest ready-review/);
 });
+
+test('continue-generating resumes only the original stopped task and fences replayed failure notices', async () => {
+  const h = harness(), mentor = await h.makeAgent('resume-parent');
+  const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Repair original task', write_scope: [], acceptance: 'AC1: observed' });
+  const worker = h.agents.get(record.childId);
+  assert.equal(h.tools.get(worker.id).has('mentor_resume'), false, 'only mentor may request continuation');
+  await assert.rejects(h.call(mentor, 'mentor_resume', { task_id: record.taskId }), /stopped/);
+  const failure = { id: 'original-stop', source: { kind: 'subagent-settled', senderSessionId: record.childId, summary: 'Background subagent failed before it finished. It left no closing message.' } };
+  h.append(mentor, 'user/message', failure);
+  worker.status = 'running';
+  await assert.rejects(h.call(mentor, 'mentor_resume', { task_id: record.taskId }), /non-running/);
+  worker.status = 'idle';
+  const status = await h.call(mentor, 'mentor_status', { task_id: record.taskId });
+  assert.deepEqual(status.recovery[0].arguments, { task_id: record.taskId });
+  assert.equal(status.recovery[0].message, '继续生成');
+  const result = await h.call(mentor, 'mentor_resume', { task_id: record.taskId });
+  assert.equal(result.outcome, 'requested'); assert.equal(result.childSessionId, record.childId);
+  assert.equal(result.acceptance, 'unchanged'); assert.equal(result.taskStatus, 'resuming');
+  assert.equal(h.agents.size, 2, 'no replacement or extra worker');
+  assert.equal(h.state(mentor).tasks[0].route.model, 'deepseek-flash');
+  assert.match(h.state(worker).tasks[0].guidance.nextSteps, /^继续生成\n/);
+  h.append(mentor, 'user/message', failure);
+  assert.equal(h.state(mentor).tasks[0].status, 'resuming', 'old failure replay cannot undo a fresh continuation request');
+  await assert.rejects(h.call(mentor, 'mentor_resume', { task_id: record.taskId }), /duplicate/);
+  await assert.rejects(h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'accepted', evidence: 'just resumed' }), /formal ready-review/);
+  await h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'cancelled', evidence: 'fixture end' });
+  await assert.rejects(h.call(mentor, 'mentor_resume', { task_id: record.taskId }), /Closed/);
+});
+
+test('resume delivery failures remain stopped, reveal bounded error code and never fabricate recovery', async () => {
+  const h = harness(), mentor = await h.makeAgent('resume-failed');
+  const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Continue', write_scope: [], acceptance: 'AC1' });
+  h.append(mentor, 'user/message', { id: 'stop', source: { kind: 'subagent-settled', senderSessionId: record.childId, summary: 'failed' } });
+  const before = h.state(mentor).tasks[0];
+  h.ctx.subagents.sendMessage = async () => { throw Object.assign(new Error('private detail must not be echoed'), { code: 'NOT_RESUMABLE' }); };
+  const result = await h.call(mentor, 'mentor_resume', { task_id: record.taskId });
+  assert.equal(result.outcome, 'failed'); assert.equal(result.failure.code, 'NOT_RESUMABLE');
+  assert.equal(result.failure.retryable, 'unknown'); assert.equal(h.state(mentor).tasks[0], before);
+  assert.equal(JSON.stringify(result).includes('private detail'), false);
+  assert.equal(h.agents.size, 2); assert.equal(h.state(mentor).tasks[0].guidance, undefined);
+});
+
+test('concurrent continuation requests have only one accepted delivery', async () => {
+  const h = harness(), mentor = await h.makeAgent('concurrent-resume');
+  const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Continue', write_scope: [], acceptance: 'AC1' });
+  h.append(mentor, 'user/message', { id: 'stop', source: { kind: 'subagent-settled', senderSessionId: record.childId, summary: 'failed' } });
+  const send = h.ctx.subagents.sendMessage;
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; });
+  const accepted = new Promise(resolve => { entered = resolve; });
+  h.ctx.subagents.sendMessage = async (...args) => { entered(); await gate; return send(...args); };
+  const pending = h.call(mentor, 'mentor_resume', { task_id: record.taskId });
+  await accepted;
+  await assert.rejects(h.call(mentor, 'mentor_resume', { task_id: record.taskId }), /duplicate/);
+  release(); assert.equal((await pending).outcome, 'requested');
+  assert.equal(h.state(mentor).tasks[0].guidanceCount, 1);
+});
+
+test('native Team queued recovery stays provisional and preserves original member identity', async () => {
+  const h = harness(), mentor = await h.makeAgent('queued-resume');
+  const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Continue original member', write_scope: [], acceptance: 'AC1' });
+  h.append(mentor, 'user/message', { source: { kind: 'codex-mentor-ledger', record: { version: 1, kind: 'assignment', taskId: record.taskId, backend: 'team', teamName: 'original-flash', teamTaskId: 'native-1' } } });
+  h.append(mentor, 'user/message', { id: 'team-stop', source: { kind: 'subagent-settled', senderSessionId: record.childId, summary: 'failed' } });
+  let queued = 0, reopened = 0;
+  h.ctx.get = name => name === 'agentTeams' ? {
+    supportsAgentOptions: true,
+    getTask: () => ({ id: 'native-1', revision: 4, status: 'completed' }),
+    updateTask: async (_caller, request) => { assert.equal(request.action, 'reopen'); reopened++; },
+    sendMessage: async (_caller, request) => { assert.equal(request.target, 'original-flash'); queued++; return { messageId: 'native-mailbox-1', status: 'queued' }; }
+  } : undefined;
+  const result = await h.call(mentor, 'mentor_resume', { task_id: record.taskId });
+  assert.equal(result.outcome, 'queued'); assert.equal(result.taskStatus, 'resuming');
+  assert.equal(result.childSessionId, record.childId); assert.equal(result.acceptance, 'unchanged');
+  assert.equal(h.state(mentor).tasks[0].guidance.delivery, 'queued');
+  await assert.rejects(h.call(mentor, 'mentor_resume', { task_id: record.taskId }), /duplicate/);
+  assert.equal(queued, 1); assert.equal(reopened, 1); assert.equal(h.agents.size, 2);
+});

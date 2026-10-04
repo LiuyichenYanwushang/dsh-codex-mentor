@@ -4,9 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { scopeOf, scopeParentOf } from '@deepseek-ai/dsh-scope';
-import { KEY, PRESET, TERMINAL, initial, fold, view, contextText, encode, text, choice, list, argsObject } from './ledger.js?mentor=0.6.0';
-import { MENTOR, WORKER } from './prompts.js?mentor=0.6.0';
-import { toolReadiness, cooperation, effectiveCapabilities, BYPASS, DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './experience.js?mentor=0.6.0';
+import { KEY, PRESET, TERMINAL, initial, fold, view, contextText, encode, text, choice, list, argsObject } from './ledger.js?mentor=0.6.1';
+import { MENTOR, WORKER } from './prompts.js?mentor=0.6.1';
+import { toolReadiness, cooperation, effectiveCapabilities, BYPASS, DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './experience.js?mentor=0.6.1';
 
 export const name = 'codex-mentor';
 export const inject = ['tools', 'systemPrompt', 'sessionProjections', 'subagents', 'agents', 'agentPresets', 'llm'];
@@ -24,7 +24,7 @@ const object = (properties, required = Object.keys(properties)) => ({ type: 'obj
 
 export function apply(ctx, config) {
   ctx.sessionProjections.register({
-    key: KEY, stateVersion: 4,
+    key: KEY, stateVersion: 5,
     stateSchema: stateZ.object({ sessionId: stateZ.string(), parentId: stateZ.string().nullable(), floor: stateZ.number().int().nonnegative(), tasks: stateZ.array(stateZ.any()), checkpoint: stateZ.string(), notes: stateZ.array(stateZ.any()), pending: stateZ.record(stateZ.string(), stateZ.string()), run: stateZ.any().nullable(), lastCompletedRun: stateZ.any().nullable(), lastInputId: stateZ.string().nullable(), recentInputIds: stateZ.array(stateZ.string()), consent: stateZ.any().nullable(), permissionCalls: stateZ.record(stateZ.string(), stateZ.boolean()), recentRecordIds: stateZ.array(stateZ.string()) }),
     init: initial, apply: fold
   });
@@ -57,7 +57,7 @@ export function apply(ctx, config) {
     const providers = ctx.llm.listProviders();
     const mentorModels = providers.some(item => item.id === 'openai-codex') ? await ctx.llm.listModels('openai-codex') : [];
     const presets = await ctx.agentPresets.list();
-    return { version: '0.6.0', backend: ctx.get?.('agentTeams') ? 'team' : 'subagent', nativeTeams: { enabled: !!ctx.get?.('agentTeams'), modelOptionsSupported: ctx.get?.('agentTeams')?.supportsAgentOptions === true }, flashCapabilities: { contextWindow: 1000000, maxOutputTokens: 384000, configuredOutputBudget: config.workerMaxTokens }, preset: presets.find(item => item.id === PRESET) ?? null, worker, mentor: { provider: 'openai-codex', models: mentorModels.map(item => item.id), inferenceTested: false }, liveSessions: (ctx.agents.list?.() ?? []).filter(agent => ctx.agentPresets.composedPreset(agent.ctx) === PRESET).map(agent => ({ sessionId: agent.id, role: agent.session.header.origin === 'subagent' ? 'worker' : 'mentor', ...toolReadiness(agent, ctx.tools), workerRouteReady: worker.ready, initializationError: failures.get(agent.id) ?? null, cooperation: cooperation(state(agent)) })), memory: 'Session-log projection; compression cannot erase recorded task facts. Session-scoped, not a cross-project vector database.' };
+    return { version: '0.6.1', backend: ctx.get?.('agentTeams') ? 'team' : 'subagent', nativeTeams: { enabled: !!ctx.get?.('agentTeams'), modelOptionsSupported: ctx.get?.('agentTeams')?.supportsAgentOptions === true }, flashCapabilities: { contextWindow: 1000000, maxOutputTokens: 384000, configuredOutputBudget: config.workerMaxTokens }, preset: presets.find(item => item.id === PRESET) ?? null, worker, mentor: { provider: 'openai-codex', models: mentorModels.map(item => item.id), inferenceTested: false }, liveSessions: (ctx.agents.list?.() ?? []).filter(agent => ctx.agentPresets.composedPreset(agent.ctx) === PRESET).map(agent => ({ sessionId: agent.id, role: agent.session.header.origin === 'subagent' ? 'worker' : 'mentor', ...toolReadiness(agent, ctx.tools), workerRouteReady: worker.ready, initializationError: failures.get(agent.id) ?? null, cooperation: cooperation(state(agent)) })), memory: 'Session-log projection; compression cannot erase recorded task facts. Session-scoped, not a cross-project vector database.' };
   }
   ctx.inject(['cordisInspect'], inner => {
     inner.effect(() => inner.cordisInspect.register({
@@ -140,8 +140,8 @@ export function apply(ctx, config) {
       return { ...decision, messages: decision.messages.filter(message => !redundant(message)).map(message => {
         const source = message.source;
         const assignment = source?.kind === 'subagent-settled' && state(agent).tasks.find(item => item.childId === source.senderSessionId);
-        if (assignment?.status !== 'stopped' || !source.summary.includes('finished and will do no further work')) return message;
-        return { ...message, content: [{ type: 'text', text: `Worker ${assignment.childId} stopped WITHOUT a reviewable report. Task ${assignment.taskId} remains incomplete. Request a formal report with mentor_guide or cancel it; do not accept a closing message.` }] };
+        if (assignment?.status !== 'stopped') return message;
+        return { ...message, content: [{ type: 'text', text: `Worker ${assignment.childId} stopped WITHOUT a reviewable report. Task ${assignment.taskId} remains incomplete; its failure cause is unconfirmed. Native notice: ${source.summary}. To request 继续生成 in the SAME session, call mentor_resume({task_id:"${assignment.taskId}"}); check existing changes and jobs before repeating work. Delivery is not progress or acceptance. Use mentor_guide for a diagnosed repair or cancel explicitly.` }] };
       }) };
     }));
     if (!child && config.requireGptMentor) owned(() => scoped.on('agent/request', async (_payload, next) => {
@@ -202,11 +202,17 @@ export function apply(ctx, config) {
     async function send(target, record, signal) {
       record.id ??= randomUUID();
       let messageId;
-      if (backend() === 'team') {
-        const recipient = target === agent.session.header.parentSession ? 'lead' : state(agent).tasks.find(item => item.childId === target)?.teamName;
+      const assignment = target === agent.session.header.parentSession ? state(agent).tasks[0] : state(agent).tasks.find(item => item.childId === target);
+      if (assignment?.backend === 'team') {
+        const recipient = target === agent.session.header.parentSession ? 'lead' : assignment.teamName;
         if (!recipient) throw new Error('No native Team member is linked to this assignment');
-        ({ messageId } = await teams().sendMessage(agent, { target: recipient, content: [{ type: 'text', text: encode(record) }], signal }));
-      } else messageId = await ctx.subagents.sendMessage(agent, target, [{ type: 'text', text: encode(record) }], { signal });
+        const delivered = await teams().sendMessage(agent, { target: recipient, content: [{ type: 'text', text: encode(record) }], signal });
+        messageId = delivered.messageId;
+        record.delivery = delivered.status;
+      } else {
+        messageId = await ctx.subagents.sendMessage(agent, target, [{ type: 'text', text: encode(record) }], { signal });
+        record.delivery = 'accepted';
+      }
       commit(record);
       return messageId;
     }
@@ -217,7 +223,8 @@ export function apply(ctx, config) {
       try { const route = await routes(); const info = await ctx.llm.resolveModelInfo(route.provider, route.model); workerRoute = { ready: true, route, reasoning: info.reasoning ?? null }; } catch (error) { workerRoute = { ready: false, error: error.message }; }
       const service = ctx.get?.('agentTeams');
       const team = backend() === 'team' ? { ready: !!service?.supportsAgentOptions, role: service?.tryMembership(agent)?.role ?? null, members: service?.supportsAgentOptions ? service.listMembers(agent) : [], tasks: service?.supportsAgentOptions ? service.listTasks(agent) : [], meaning: 'Native completed means submitted work; Mentor accepted is independent acceptance.' } : null;
-      return { ...result, backend: backend(), team, capabilities: { ...toolReadiness(agent, ctx.tools), worker: workerRoute }, cooperation: cooperation(state(agent)), lastRunCooperation: cooperation(state(agent), state(agent).lastCompletedRun), tasks: selected, notes: result.notes.map(({ evidence, ...note }) => ({ ...note, evidence: evidence?.slice(0, 500) ?? '' })), activity: selected.map(item => ({ taskId: item.taskId, childId: item.childId, activity: ctx.agents.get(item.childId)?.status ?? 'not-live' })) };
+      const recovery = child ? [] : selected.filter(item => item.status === 'stopped').map(item => ({ taskId: item.taskId, available: !recovering.has(item.taskId) && ctx.agents.get(item.childId)?.status !== 'running', tool: 'mentor_resume', arguments: { task_id: item.taskId }, message: '继续生成', limitation: 'Original-session delivery may fail; the stop is not automatically a network diagnosis.' }));
+      return { ...result, recovery, backend: backend(), team, capabilities: { ...toolReadiness(agent, ctx.tools), worker: workerRoute }, cooperation: cooperation(state(agent)), lastRunCooperation: cooperation(state(agent), state(agent).lastCompletedRun), tasks: selected, notes: result.notes.map(({ evidence, ...note }) => ({ ...note, evidence: evidence?.slice(0, 500) ?? '' })), activity: selected.map(item => ({ taskId: item.taskId, childId: item.childId, activity: ctx.agents.get(item.childId)?.status ?? 'not-live' })) };
     });
     if (!child) tool('mentor_wait', 'Yield this turn while selected Mentor workers are pending. Their formal reports or stop notices resume this session; no Agent Teams polling is needed.', object({ task_ids: strings('Tasks to await; omit for all outstanding tasks.') }, []), async (args, exec) => {
       const ids = list(args.task_ids ?? [], 'task_ids');
@@ -367,6 +374,27 @@ export function apply(ctx, config) {
       const delegated = { ...record, kind: 'delegated', childId: started.childId, started: true, provisioning: false };
       commit(delegated);
       return { record: delegated, backend: selectedBackend, childSessionId: delegated.childId, member: started.member ?? null, effectiveCapabilities: capabilities, messageId: started.messageId ?? null };
+    });
+    const recovering = new Set();
+    tool('mentor_resume', 'Ask a stopped worker to continue generating in its original session. Returns delivery status, not evidence of progress or acceptance.', object({
+      task_id: str('Stopped task from mentor_status. Running, already-resuming and closed tasks are rejected.'),
+      message: str('Optional brief continuation instruction; default 继续生成. Existing scope, model and acceptance rules stay unchanged. At most 1000 characters.')
+    }, ['task_id']), async (args, exec) => {
+      const assignment = task(args.task_id);
+      if (TERMINAL.includes(assignment.status)) throw new Error('Closed task cannot resume; acceptance or cancellation is not undone.');
+      if (assignment.status !== 'stopped' || recovering.has(assignment.taskId) || ctx.agents.get(assignment.childId)?.status === 'running') throw new Error('Resume only a stopped, non-running worker; do not send duplicate continuation requests.');
+      const message = args.message === undefined ? '继续生成' : text(args.message, 'message', 1000);
+      const record = { version: 1, kind: 'guidance', taskId: assignment.taskId, reportId: assignment.report?.id ?? null, purpose: 'lifecycle-repair', recovery: { stopId: assignment.lastStop?.nativeMessageId ?? null }, diagnosis: 'The worker stopped. Its failure cause is unconfirmed; this continuation request is not a network diagnosis.', nextSteps: `${message}\nRecover the original assignment, checkpoint and latest guidance with mentor_status. Use permitted tools to check existing changes and outstanding jobs before doing more work; do not blindly repeat a write, delete unreviewed changes or start duplicate jobs. Preserve the original model, scope and constraints.`, validation: 'Report newly observed progress, a specific blocker, or a formal ready-review report. Delivery and running activity do not prove successful recovery or acceptance.', fallback: 'If the provider still fails, a job is active, or the recovery point is unsafe, report blocked with observed evidence and ask the mentor; do not retry indefinitely.' };
+      recovering.add(assignment.taskId);
+      try {
+        if (assignment.backend === 'team') { const latest = teams().getTask(agent, assignment.teamTaskId); if (latest.status === 'completed') await teams().updateTask(agent, { taskId: latest.id, expectedRevision: latest.revision, action: 'reopen' }); }
+        const messageId = await send(assignment.childId, record, exec.signal);
+        return { taskId: assignment.taskId, childSessionId: assignment.childId, outcome: record.delivery === 'queued' ? 'queued' : 'requested', messageId, guidanceId: record.id, taskStatus: task(assignment.taskId).status, acceptance: 'unchanged', next: 'Wait for a fresh formal report or stop notice; delivery is not proof of progress.' };
+      } catch (error) {
+        if (exec.signal.aborted) throw error;
+        const code = typeof error.code === 'string' && /^[A-Z0-9_-]{1,80}$/.test(error.code) ? error.code : 'RESUME_DELIVERY_FAILED';
+        return { taskId: assignment.taskId, childSessionId: assignment.childId, outcome: 'failed', taskStatus: task(assignment.taskId).status, failure: { code, retryable: 'unknown', summary: 'Native continuation delivery was not confirmed. No replacement worker was created.' }, next: 'Inspect session/provider availability before another manual attempt; do not claim the task resumed.' };
+      } finally { recovering.delete(assignment.taskId); }
     });
     tool('mentor_guide', 'Tutor a blocked or unfinished Flash worker and resume it. Provide a testable diagnosis, concrete next steps, validation and fallback; records guidance in both sessions.', object({
       task_id: str('Task returned by mentor_delegate.'), diagnosis: str('Evidence-based diagnosis, explicitly label hypotheses.'), next_steps: str('Specific checks/actions, at most 3000 characters.'), validation: str('Result that confirms or falsifies the advice.'), fallback: str('What to report or do if the check fails.'), purpose: enumeration(['task-guidance', 'implementation-rework', 'report-correction', 'lifecycle-repair'], 'Why the tutor is resuming this worker; recorded separately from implementation rework.')

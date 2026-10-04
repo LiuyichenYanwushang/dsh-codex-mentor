@@ -51,3 +51,16 @@ test('a delayed report-turn settlement cannot stop guided work, but a later repo
   assert.equal(fold(state, settlement('old-stop')), state, 'inbox/history replay consumes one native settlement only once');
   assert.equal(fold(state, settlement('new-reportless-stop')).tasks[0].status, 'stopped');
 });
+test('a report or new failure overtaking resume delivery is not erased by its late local commit', () => {
+  const stopped = (state, id) => fold(state, { type: 'user/message', seq: 21, data: { id, source: { kind: 'subagent-settled', senderSessionId: 'flash', summary: 'failed before closing' } } });
+  const guidance = { id: 'resume', kind: 'guidance', taskId: 'task', reportId: null, recovery: { stopId: 'old-stop' }, purpose: 'lifecycle-repair' };
+  const old = stopped(lead(), 'old-stop');
+  const submitted = record(old, { ...report, id: 'fresh-report', childId: 'flash' });
+  assert.equal(record(submitted, guidance).tasks[0].status, 'ready-review', 'explicit null reportId still fences a new formal report');
+  const newFailure = stopped(old, 'new-stop');
+  assert.equal(record(newFailure, guidance).tasks[0].status, 'stopped', 'fresh failure after retry remains actionable');
+  const resumed = record(old, guidance);
+  assert.equal(resumed.tasks[0].status, 'resuming', 'delivery is not an implementing/progress claim');
+  assert.equal(stopped(resumed, 'old-stop'), resumed, 'duplicated old native failure is ignored');
+  assert.equal(stopped(resumed, 'another-stop').tasks[0].status, 'stopped');
+});

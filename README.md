@@ -43,6 +43,22 @@ node scripts/patch-native-teams.mjs --runtime /absolute/path/to/@deepseek-ai/dsh
 
 原生 DSH 当前没有禁用 settlement 唤醒的 API；插件只能减少冗余模型请求，不能取消所有原生空 turn/后台通知。M14 暂不增加目录工具，优先使用窄范围发现；复杂断言质量仍取决于导师判断。
 
+## 0.6.1：原会话继续生成
+
+导师可对 `stopped`、未在运行的 worker 调用：
+
+```js
+mentor_resume({ task_id: "原任务 ID" }) // 默认发送「继续生成」
+```
+
+可选 `message` 加一句恢复指示，无需重填四段指导。沿用原 child/task ID、Flash 路由、思考配置与工作约束；不另派 worker，不接管，不撤销验收/取消。恢复提示要求先核对检查点、现有改动及未结束作业，避免重复写入或启动重复检查。`mentor_status` 和无报告停止通知提供此入口。
+
+- 返回 `requested`/`queued` 只代表恢复消息被接收或排队，任务处于 `resuming`，不是已有进展、修复成功或验收通过。
+- `running`、正在恢复、已结案及同任务并发恢复会拒绝；原生投递失败返回有限错误代码，保留原状态，不创建替代 worker，不无限重试。
+- 相同旧停止通知的日志重放不会再次把已请求恢复的任务变成 stopped；恢复后的新失败仍会停止任务。
+- 停止原因不自动标为网络中断。真实 provider 错误详情、遗留进程和改动的自动汇总尚未实现；此版本增加的是受控续接，不是完整的 P0 失败诊断。
+- 0.5 旧子代理任务按它自己的后端恢复，即使当前已开启 Teams；新 Teams 功能仍要求原生模型接口补丁在服务重启后实际加载。
+
 ## 单插件安装
 
 原来的模式修复和 Host 热加载激活合并到主 bundle。Host 使用相对、带版本的入口文件（内部载入带版本的模块 URL），不包含本机路径；升级不再需要另装 live-fix。安装器若报告 restart-required，仍应以其状态和 `CodexMentor.diagnostics` 的实际版本为准，不能仅凭包版本判断已生效。已有会话保留其 preset revision，不承诺所有模块都在不重启时更新。
