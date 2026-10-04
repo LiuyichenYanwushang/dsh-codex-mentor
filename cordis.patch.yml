@@ -1,11 +1,11 @@
 - insert:
     - id: codex-mentor-host
-      name: './host-0.5.0.js'
+      name: './host-0.6.0.js'
       config:
         workerProvider: auto
         workerModel: deepseek-flash
         workerMaxTokens: 384000
-        maxConcurrentWorkers: 3
+        maxConcurrentWorkers: 3 # Subagent backend only; native Team staffing belongs to the mentor.
         requireGptMentor: true
     - id: preset-codex-mentor
       name: '@deepseek-ai/dsh-agent-preset'

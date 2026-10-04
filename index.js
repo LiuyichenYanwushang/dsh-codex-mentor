@@ -4,9 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { scopeOf, scopeParentOf } from '@deepseek-ai/dsh-scope';
-import { KEY, PRESET, TERMINAL, initial, fold, view, contextText, encode, text, choice, list, argsObject } from './ledger.js?mentor=0.5.0';
-import { MENTOR, WORKER } from './prompts.js?mentor=0.5.0';
-import { toolReadiness, cooperation, effectiveCapabilities, BYPASS, DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './experience.js?mentor=0.5.0';
+import { KEY, PRESET, TERMINAL, initial, fold, view, contextText, encode, text, choice, list, argsObject } from './ledger.js?mentor=0.6.0';
+import { MENTOR, WORKER } from './prompts.js?mentor=0.6.0';
+import { toolReadiness, cooperation, effectiveCapabilities, BYPASS, DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './experience.js?mentor=0.6.0';
 
 export const name = 'codex-mentor';
 export const inject = ['tools', 'systemPrompt', 'sessionProjections', 'subagents', 'agents', 'agentPresets', 'llm'];
@@ -24,7 +24,7 @@ const object = (properties, required = Object.keys(properties)) => ({ type: 'obj
 
 export function apply(ctx, config) {
   ctx.sessionProjections.register({
-    key: KEY, stateVersion: 3,
+    key: KEY, stateVersion: 4,
     stateSchema: stateZ.object({ sessionId: stateZ.string(), parentId: stateZ.string().nullable(), floor: stateZ.number().int().nonnegative(), tasks: stateZ.array(stateZ.any()), checkpoint: stateZ.string(), notes: stateZ.array(stateZ.any()), pending: stateZ.record(stateZ.string(), stateZ.string()), run: stateZ.any().nullable(), lastCompletedRun: stateZ.any().nullable(), lastInputId: stateZ.string().nullable(), recentInputIds: stateZ.array(stateZ.string()), consent: stateZ.any().nullable(), permissionCalls: stateZ.record(stateZ.string(), stateZ.boolean()), recentRecordIds: stateZ.array(stateZ.string()) }),
     init: initial, apply: fold
   });
@@ -42,8 +42,7 @@ export function apply(ctx, config) {
       try {
         const models = await ctx.llm.listModels(provider);
         if (!models.some(item => item.id === config.workerModel)) { diagnostics.push(`${provider}: ${config.workerModel} not advertised; configure credentials/model route in Settings → Models`); continue; }
-        await ctx.llm.resolveCallConfig({ provider, model: config.workerModel, maxTokens: config.workerMaxTokens }, signal);
-        return { provider, model: config.workerModel, maxTokens: config.workerMaxTokens };
+        return await ctx.llm.resolveCallConfig({ provider, model: config.workerModel, maxTokens: config.workerMaxTokens }, signal);
       } catch (error) {
         if (signal?.aborted) throw error;
         diagnostics.push(`${provider}: catalog or configuration unavailable (${error.code ?? error.name})`);
@@ -58,7 +57,7 @@ export function apply(ctx, config) {
     const providers = ctx.llm.listProviders();
     const mentorModels = providers.some(item => item.id === 'openai-codex') ? await ctx.llm.listModels('openai-codex') : [];
     const presets = await ctx.agentPresets.list();
-    return { version: '0.5.0', flashCapabilities: { contextWindow: 1000000, maxOutputTokens: 384000, configuredOutputBudget: config.workerMaxTokens }, preset: presets.find(item => item.id === PRESET) ?? null, worker, mentor: { provider: 'openai-codex', models: mentorModels.map(item => item.id), inferenceTested: false }, liveSessions: (ctx.agents.list?.() ?? []).filter(agent => ctx.agentPresets.composedPreset(agent.ctx) === PRESET).map(agent => ({ sessionId: agent.id, role: agent.session.header.origin === 'subagent' ? 'worker' : 'mentor', ...toolReadiness(agent, ctx.tools), workerRouteReady: worker.ready, initializationError: failures.get(agent.id) ?? null, cooperation: cooperation(state(agent)) })), memory: 'Session-log projection; compression cannot erase recorded task facts. Session-scoped, not a cross-project vector database.' };
+    return { version: '0.6.0', backend: ctx.get?.('agentTeams') ? 'team' : 'subagent', nativeTeams: { enabled: !!ctx.get?.('agentTeams'), modelOptionsSupported: ctx.get?.('agentTeams')?.supportsAgentOptions === true }, flashCapabilities: { contextWindow: 1000000, maxOutputTokens: 384000, configuredOutputBudget: config.workerMaxTokens }, preset: presets.find(item => item.id === PRESET) ?? null, worker, mentor: { provider: 'openai-codex', models: mentorModels.map(item => item.id), inferenceTested: false }, liveSessions: (ctx.agents.list?.() ?? []).filter(agent => ctx.agentPresets.composedPreset(agent.ctx) === PRESET).map(agent => ({ sessionId: agent.id, role: agent.session.header.origin === 'subagent' ? 'worker' : 'mentor', ...toolReadiness(agent, ctx.tools), workerRouteReady: worker.ready, initializationError: failures.get(agent.id) ?? null, cooperation: cooperation(state(agent)) })), memory: 'Session-log projection; compression cannot erase recorded task facts. Session-scoped, not a cross-project vector database.' };
   }
   ctx.inject(['cordisInspect'], inner => {
     inner.effect(() => inner.cordisInspect.register({
@@ -113,7 +112,7 @@ export function apply(ctx, config) {
         if (!assignment) return execution.name === 'mentor_status' ? undefined : 'Assignment not yet admitted; recover it with mentor_status';
         if (TERMINAL.includes(assignment.status) && execution.name !== 'mentor_status') return 'This assignment is closed';
         if (['blocked', 'ready-review'].includes(assignment.status) && !['mentor_status', 'mentor_memory'].includes(execution.name)) return 'Awaiting tutor guidance or review; a local ledger notice does not authorize more work.';
-        if (!assignment.writeScope.length && !readonlyTools.has(execution.name)) return 'Read-only assignment: mutation and shell tools are disabled';
+        if (!assignment.writeScope.length && !readonlyTools.has(execution.name) && !(assignment.backend === 'team' && ['team_task_get', 'team_task_list', 'team_task_update', 'wait_agent', 'list_agents', 'send_message'].includes(execution.name))) return 'Read-only assignment: mutation and shell tools are disabled';
       }));
       owned(() => scoped.on('agent/pre-step', async (_payload, next) => {
         const decision = await next();
@@ -133,7 +132,7 @@ export function apply(ctx, config) {
         const source = message.source;
         if (source?.kind !== 'subagent-settled') return false;
         const assignment = state(agent).tasks.find(item => item.childId === source.senderSessionId);
-        return assignment && [...TERMINAL, 'blocked', 'ready-review'].includes(assignment.status) && source.summary === `Background subagent ${source.senderSessionId} finished and will do no further work unless you send it more.`;
+        return assignment && (assignment.handledSettlements?.includes(message.id) || [...TERMINAL, 'blocked', 'ready-review'].includes(assignment.status)) && source.summary === `Background subagent ${source.senderSessionId} finished and will do no further work unless you send it more.`;
       };
       const decision = await next();
       if (decision.kind === 'reject') return decision;
@@ -151,11 +150,12 @@ export function apply(ctx, config) {
       return selected;
     }));
     // restrict() masks inherited tools, not an Agent's own bridge registrations.
-    const bypass = BYPASS;
+    const teamControls = new Set(['list_agents', 'send_message', 'interrupt_agent', 'team_task_create', 'team_task_update', 'team_task_get', 'team_task_list', 'wait_agent']);
+    const bypass = BYPASS.filter(name => !teamControls.has(name));
     const inheritedScope = scopeParentOf(scopeOf(agent.ctx));
     const deny = bypass.filter(tool => ctx.tools.get(tool, inheritedScope));
     if (deny.length) owned(() => scoped.tools.restrict({ deny }));
-    owned(() => scoped.tools.guard(execution => bypass.includes(execution.name) ? 'Use the mentor protocol; alternate delegation is disabled in this mode' : undefined));
+    owned(() => scoped.tools.guard(execution => bypass.includes(execution.name) || (teamControls.has(execution.name) && backend() !== 'team') ? 'Use mentor_delegate for fixed Flash members; alternate delegation is disabled in this mode' : undefined));
     if (!child) owned(() => scoped.tools.guard(execution => {
       if (execution.name.startsWith('mentor_') || ['ask_user_question', 'skill', 'todo_write'].includes(execution.name)) return;
       const current = state(agent), readiness = toolReadiness(agent, ctx.tools);
@@ -188,9 +188,25 @@ export function apply(ctx, config) {
       const summary = `Codex Mentor: ${record.kind} ${record.taskId ?? ''}`.trim();
       agent.inject(createUserMessage({ source: { kind: 'codex-mentor-ledger', form: 'notice', summary, record }, content: [{ type: 'text', text: summary }] }));
     }
+    function backend() {
+      const own = state(agent);
+      if (own.run) return own.run.backend ?? 'subagent';
+      if (child && own.tasks[0]) return own.tasks[0].backend ?? 'subagent';
+      return ctx.get?.('agentTeams') ? 'team' : 'subagent';
+    }
+    function teams() {
+      const service = ctx.get?.('agentTeams');
+      if (service?.supportsAgentOptions !== true) throw new Error('Native Agent Teams needs the model-options API extension; no GPT teammate or subagent fallback was started.');
+      return service;
+    }
     async function send(target, record, signal) {
       record.id ??= randomUUID();
-      const messageId = await ctx.subagents.sendMessage(agent, target, [{ type: 'text', text: encode(record) }], { signal });
+      let messageId;
+      if (backend() === 'team') {
+        const recipient = target === agent.session.header.parentSession ? 'lead' : state(agent).tasks.find(item => item.childId === target)?.teamName;
+        if (!recipient) throw new Error('No native Team member is linked to this assignment');
+        ({ messageId } = await teams().sendMessage(agent, { target: recipient, content: [{ type: 'text', text: encode(record) }], signal }));
+      } else messageId = await ctx.subagents.sendMessage(agent, target, [{ type: 'text', text: encode(record) }], { signal });
       commit(record);
       return messageId;
     }
@@ -198,8 +214,10 @@ export function apply(ctx, config) {
       const result = view(state(agent));
       const selected = args.task_id ? [task(args.task_id)] : result.tasks.map(item => ({ taskId: item.taskId, childId: item.childId, goal: item.goal?.slice(0, 400), writeScope: item.writeScope, effectiveCapabilities: effectiveCapabilities(item.writeScope), status: item.status, question: item.report?.question ?? '', next: item.guidance?.nextSteps?.slice(0, 700) ?? '' }));
       let workerRoute;
-      try { workerRoute = { ready: true, route: await routes() }; } catch (error) { workerRoute = { ready: false, error: error.message }; }
-      return { ...result, capabilities: { ...toolReadiness(agent, ctx.tools), worker: workerRoute }, cooperation: cooperation(state(agent)), lastRunCooperation: cooperation(state(agent), state(agent).lastCompletedRun), tasks: selected, notes: result.notes.map(({ evidence, ...note }) => ({ ...note, evidence: evidence?.slice(0, 500) ?? '' })), activity: selected.map(item => ({ taskId: item.taskId, childId: item.childId, activity: ctx.agents.get(item.childId)?.status ?? 'not-live' })) };
+      try { const route = await routes(); const info = await ctx.llm.resolveModelInfo(route.provider, route.model); workerRoute = { ready: true, route, reasoning: info.reasoning ?? null }; } catch (error) { workerRoute = { ready: false, error: error.message }; }
+      const service = ctx.get?.('agentTeams');
+      const team = backend() === 'team' ? { ready: !!service?.supportsAgentOptions, role: service?.tryMembership(agent)?.role ?? null, members: service?.supportsAgentOptions ? service.listMembers(agent) : [], tasks: service?.supportsAgentOptions ? service.listTasks(agent) : [], meaning: 'Native completed means submitted work; Mentor accepted is independent acceptance.' } : null;
+      return { ...result, backend: backend(), team, capabilities: { ...toolReadiness(agent, ctx.tools), worker: workerRoute }, cooperation: cooperation(state(agent)), lastRunCooperation: cooperation(state(agent), state(agent).lastCompletedRun), tasks: selected, notes: result.notes.map(({ evidence, ...note }) => ({ ...note, evidence: evidence?.slice(0, 500) ?? '' })), activity: selected.map(item => ({ taskId: item.taskId, childId: item.childId, activity: ctx.agents.get(item.childId)?.status ?? 'not-live' })) };
     });
     if (!child) tool('mentor_wait', 'Yield this turn while selected Mentor workers are pending. Their formal reports or stop notices resume this session; no Agent Teams polling is needed.', object({ task_ids: strings('Tasks to await; omit for all outstanding tasks.') }, []), async (args, exec) => {
       const ids = list(args.task_ids ?? [], 'task_ids');
@@ -240,6 +258,13 @@ export function apply(ctx, config) {
         const record = { version: 1, kind: 'report', taskId: assignment.taskId, childId: agent.id, status, summary: text(args.summary, 'summary', 2000), evidence: text(args.evidence, 'evidence'), attempts: status === 'blocked' ? text(args.attempts, 'attempts', 2000) : '', question: status === 'blocked' ? text(args.question, 'question', 1000) : '' };
         record.evidenceGate = status === 'ready-review' ? { changes: list(args.changes, 'changes'), checks: list(args.checks, 'checks'), criteria: list(args.criteria, 'criteria'), deviations: list(args.deviations ?? [], 'deviations'), assumptions: list(args.assumptions ?? [], 'assumptions'), risks: list(args.risks, 'risks') } : null;
         if (record.evidenceGate && !record.evidenceGate.criteria.length) throw new Error('Evidence Gate requires acceptance-criterion results');
+        if (status === 'ready-review' && assignment.backend === 'team') {
+          const latest = teams().getTask(agent, assignment.teamTaskId);
+          if (latest.status !== 'completed') {
+            if (latest.ownerName !== assignment.teamName || latest.status !== 'in_progress') throw new Error('Get and claim your linked native Team task before submitting work');
+            await teams().updateTask(agent, { taskId: latest.id, expectedRevision: latest.revision, action: 'complete' });
+          }
+        }
         const messageId = await send(agent.session.header.parentSession, record, exec.signal);
         if (status !== 'progress') exec.concludeTurn();
         return { record, messageId, delivery: 'accepted, not a tutor reply' };
@@ -254,10 +279,10 @@ export function apply(ctx, config) {
       if (mode === 'direct' && !own.consent) throw new Error(`Direct execution requires a real user answer. Use ask_user_question with question id "${DIRECT_QUESTION_ID}" and options "修复导师能力后继续", "${DIRECT_LABEL}", "只做能力诊断"; no answer or a skipped answer is not permission.`);
       let route = null, error = '';
       if (mode === 'collaborative' && readiness.toolsReady) {
-        try { route = await routes(exec.signal); } catch (failure) { error = failure.message; }
+        try { if (ctx.get?.('agentTeams')) teams(); route = await routes(exec.signal); } catch (failure) { error = failure.message; }
       }
       if (!readiness.toolsReady) error = `Missing tools: ${readiness.missing.join(', ')}`;
-      const record = { version: 1, kind: 'begin', sessionId: agent.id, runId: randomUUID(), taskKind: args.task_kind ? choice(args.task_kind, 'task_kind', ['overview', 'review', 'implementation', 'audit', 'other']) : /audit|审计/i.test(args.task) ? 'audit' : /overview|概览|目前.*情况|当前.*状态/i.test(args.task) ? 'overview' : 'other', mode: error ? 'diagnostic' : mode, task: text(args.task, 'task', 1000), route, error, consent: mode === 'direct' ? own.consent : null };
+      const record = { version: 1, kind: 'begin', sessionId: agent.id, runId: randomUUID(), taskKind: args.task_kind ? choice(args.task_kind, 'task_kind', ['overview', 'review', 'implementation', 'audit', 'other']) : /audit|审计/i.test(args.task) ? 'audit' : /overview|概览|目前.*情况|当前.*状态/i.test(args.task) ? 'overview' : 'other', mode: error ? 'diagnostic' : mode, backend: ctx.get?.('agentTeams') ? 'team' : 'subagent', task: text(args.task, 'task', 1000), route, error, consent: mode === 'direct' ? own.consent : null };
       commit(record);
       return { record, ...readiness, workerRouteReady: !!route, workerStarted: false, choices: error ? ['修复导师能力后继续', DIRECT_LABEL, '只做能力诊断'] : [] };
     }
@@ -291,6 +316,7 @@ export function apply(ctx, config) {
       return { record, checkId: record.id, actualResult: record.output, isError, executionSucceeded: !isError, criterionSatisfied: null, reusableInputs: stable, scopeLimit: 'Only the declared file inputs were fingerprinted; remote state, environment, omitted dependencies and changed claims need new evidence.' };
     });
     tool('mentor_delegate', 'Start a fixed-model Flash worker with a self-contained assignment and return its durable id. Runs in the background; reports can ask for tutor guidance.', object({
+      name: str('Optional permanent lower-kebab-case native teammate name; generated when omitted.'), reasoning_effort: str('Required for native Teams: an advertised Flash effort id from mentor_status, or "default" to deliberately choose its model default. Optional for subagents.'),
       goal: str('Self-contained task and relevant context, at most 3000 characters.'), write_scope: strings('Workspace-relative write scope. [] disables ALL mutation and shell tools, including Git, hashes and tests; assign those checks to the mentor. No globs, absolute paths or parent traversal.'),
       required_capabilities: { type: 'array', items: enumeration(['fileRead', 'fileWrite', 'shell', 'tests', 'formalReport'], 'Required assignment capability.'), description: 'Optional execution requirements; unsupported capabilities are rejected before worker creation.' },
       acceptance: str('Concrete acceptance criteria with identifiers, at most 2000 characters.'), constraints: str('Architectural boundaries and restrictions, at most 2000 characters.'),
@@ -300,7 +326,7 @@ export function apply(ctx, config) {
       const own = state(agent);
       if (own.run?.mode !== 'collaborative') throw new Error((own.run?.error || 'Collaboration is not ready; inspect mentor_status and disclose the blocker.') + ' No direct execution or model fallback was authorized.');
       const active = own.tasks.filter(item => !TERMINAL.includes(item.status) || ctx.agents.get(item.childId)?.status === 'running');
-      if (active.length >= config.maxConcurrentWorkers) throw new Error('Outstanding worker limit reached; guide or review existing workers first');
+      if (own.run.backend !== 'team' && active.length >= config.maxConcurrentWorkers) throw new Error('Outstanding worker limit reached; guide or review existing workers first');
       if (own.tasks.length >= 64) throw new Error('Session task ledger is full (64); start a new session');
       const writeScope = list(args.write_scope, 'write_scope').map(path => {
         const normalized = path.replaceAll('\\', '/').replace(/\/$/, '');
@@ -310,31 +336,45 @@ export function apply(ctx, config) {
       const capabilities = effectiveCapabilities(writeScope);
       const required = list(args.required_capabilities ?? [], 'required_capabilities');
       if (required.some(key => capabilities[key] !== true)) throw new Error('Assignment requires unavailable capabilities: ' + required.filter(key => capabilities[key] !== true).join(', ') + '. Empty write_scope disables shell/Git/tests; allocate these checks to the mentor.');
-      if (own.run.taskKind === 'overview' && own.tasks.some(item => item.runId === own.run.runId && item.started)) throw new Error('Overview budget is one worker. Narrow the question and sample its important claims instead of duplicating its reading.');
+      if (own.run.backend !== 'team' && own.run.taskKind === 'overview' && own.tasks.some(item => item.runId === own.run.runId && item.started)) throw new Error('Overview budget is one worker. Narrow the question and sample its important claims instead of duplicating its reading.');
       const overlap = (a, b) => a === b || a.startsWith(b + '/') || b.startsWith(a + '/');
       if (active.some(item => item.writeScope.some(a => writeScope.some(b => overlap(a, b))))) throw new Error('Write scope overlaps an outstanding worker; review/cancel it or choose disjoint paths');
-      const route = await routes(exec.signal);
-      const record = { version: 1, kind: 'assignment', taskId: randomUUID(), runId: own.run.runId, parentRunId: own.run.runId, parentId: agent.id, effectiveCapabilities: capabilities, goal: text(args.goal, 'goal'), writeScope, acceptance: text(args.acceptance, 'acceptance', 2000), constraints: args.constraints ? text(args.constraints, 'constraints', 2000) : '', contract: { invariants: list(args.invariants ?? [], 'invariants'), interfaces: list(args.interfaces ?? [], 'interfaces'), failureTests: list(args.failure_tests ?? [], 'failure_tests'), openQuestions: list(args.open_questions ?? [], 'open_questions'), mathematicalModel: args.mathematical_model ? text(args.mathematical_model, 'mathematical_model', 2000) : '' }, route };
+      const selectedBackend = own.run.backend ?? 'subagent';
+      if (selectedBackend === 'team') teams();
+      if (selectedBackend === 'team' && !args.reasoning_effort) throw new Error('The mentor must choose reasoning_effort for each teammate; use an advertised effort or "default".');
+      let route = await routes(exec.signal);
+      if (args.reasoning_effort && args.reasoning_effort !== 'default') route = await ctx.llm.resolveCallConfig({ ...route, reasoningEffort: text(args.reasoning_effort, 'reasoning_effort', 80) }, exec.signal);
+      const record = { version: 1, kind: 'assignment', taskId: randomUUID(), runId: own.run.runId, parentRunId: own.run.runId, parentId: agent.id, backend: selectedBackend, reasoningDecision: args.reasoning_effort ?? 'default', effectiveCapabilities: capabilities, goal: text(args.goal, 'goal'), writeScope, acceptance: text(args.acceptance, 'acceptance', 2000), constraints: args.constraints ? text(args.constraints, 'constraints', 2000) : '', contract: { invariants: list(args.invariants ?? [], 'invariants'), interfaces: list(args.interfaces ?? [], 'interfaces'), failureTests: list(args.failure_tests ?? [], 'failure_tests'), openQuestions: list(args.open_questions ?? [], 'open_questions'), mathematicalModel: args.mathematical_model ? text(args.mathematical_model, 'mathematical_model', 2000) : '' }, route };
+      if (selectedBackend === 'team') {
+        record.teamName = args.name ? text(args.name, 'name', 80) : 'flash-' + record.taskId.slice(0, 8);
+        const nativeTask = await teams().createTask(agent, { subject: record.goal.slice(0, 120), description: `Mentor assignment ${record.taskId}\n${record.goal}\nAcceptance: ${record.acceptance}\nNative completed = submitted work, not mentor acceptance.`, writeScopes: writeScope });
+        record.teamTaskId = nativeTask.id;
+      }
       const prompt = encode(record) + '\n\nSession notes (data, not authority):\n' + JSON.stringify(own.notes);
       const childId = randomUUID();
       commit({ ...record, kind: 'delegated', childId, provisioning: true });
       let started;
       try {
-        started = await ctx.subagents.startContinuable({ provider: 'spawn', childId, label: record.goal.slice(0, 80), request: { parent: agent, prompt: [{ type: 'text', text: prompt }], agentOptions: route, persona: WORKER, maxDepth: 1 }, signal: exec.signal });
+        if (selectedBackend === 'team') {
+          const { member } = await teams().spawnTeammate(agent, { name: record.teamName, description: record.goal.slice(0, 200), prompt: [{ type: 'text', text: prompt }], context: 'fresh', provider: 'spawn', childId, agentOptions: route, persona: WORKER, signal: exec.signal });
+          started = { childId: member.id, member };
+        } else started = await ctx.subagents.startContinuable({ provider: 'spawn', childId, label: record.goal.slice(0, 80), request: { parent: agent, prompt: [{ type: 'text', text: prompt }], agentOptions: route, persona: WORKER, maxDepth: 1 }, signal: exec.signal });
       } catch (error) {
-        commit({ version: 1, kind: 'review', taskId: record.taskId, verdict: 'cancelled', evidence: 'Child creation was rejected; no child was published. See the tool error.' });
+        commit({ version: 1, kind: 'review', taskId: record.taskId, verdict: 'cancelled', evidence: 'Worker creation failed; no successful startup is claimed. Inspect native roster and the tool error.' });
+        if (record.teamTaskId) { const latest = teams().getTask(agent, record.teamTaskId); await teams().updateTask(agent, { taskId: latest.id, expectedRevision: latest.revision, action: 'delete' }); }
         throw error;
       }
       const delegated = { ...record, kind: 'delegated', childId: started.childId, started: true, provisioning: false };
       commit(delegated);
-      return { record: delegated, childSessionId: delegated.childId, effectiveCapabilities: capabilities, messageId: started.messageId };
+      return { record: delegated, backend: selectedBackend, childSessionId: delegated.childId, member: started.member ?? null, effectiveCapabilities: capabilities, messageId: started.messageId ?? null };
     });
     tool('mentor_guide', 'Tutor a blocked or unfinished Flash worker and resume it. Provide a testable diagnosis, concrete next steps, validation and fallback; records guidance in both sessions.', object({
       task_id: str('Task returned by mentor_delegate.'), diagnosis: str('Evidence-based diagnosis, explicitly label hypotheses.'), next_steps: str('Specific checks/actions, at most 3000 characters.'), validation: str('Result that confirms or falsifies the advice.'), fallback: str('What to report or do if the check fails.'), purpose: enumeration(['task-guidance', 'implementation-rework', 'report-correction', 'lifecycle-repair'], 'Why the tutor is resuming this worker; recorded separately from implementation rework.')
     }, ['task_id', 'diagnosis', 'next_steps', 'validation', 'fallback']), async (args, exec) => {
       const assignment = task(args.task_id);
       if (TERMINAL.includes(assignment.status)) throw new Error('Task is already closed');
-      const record = { version: 1, kind: 'guidance', taskId: assignment.taskId, purpose: args.purpose ? choice(args.purpose, 'purpose', ['task-guidance', 'implementation-rework', 'report-correction', 'lifecycle-repair']) : 'task-guidance', diagnosis: text(args.diagnosis, 'diagnosis', 2000), nextSteps: text(args.next_steps, 'next_steps'), validation: text(args.validation, 'validation', 2000), fallback: text(args.fallback, 'fallback', 1000) };
+      const record = { version: 1, kind: 'guidance', taskId: assignment.taskId, reportId: assignment.report?.id ?? null, purpose: args.purpose ? choice(args.purpose, 'purpose', ['task-guidance', 'implementation-rework', 'report-correction', 'lifecycle-repair']) : 'task-guidance', diagnosis: text(args.diagnosis, 'diagnosis', 2000), nextSteps: text(args.next_steps, 'next_steps'), validation: text(args.validation, 'validation', 2000), fallback: text(args.fallback, 'fallback', 1000) };
+      if (assignment.backend === 'team') { const latest = teams().getTask(agent, assignment.teamTaskId); if (latest.status === 'completed') await teams().updateTask(agent, { taskId: latest.id, expectedRevision: latest.revision, action: 'reopen' }); }
       return { record, messageId: await send(assignment.childId, record, exec.signal) };
     });
     tool('mentor_review', 'Assess recorded execution evidence against every reported criterion, request correction, or cancel. accepted endorses the entire latest report, not selected claims; incorrect reports need rework.', object({ task_id: str('Task id.'), verdict: enumeration(['accepted', 'rework', 'cancelled'], 'Acceptance decision.'), evidence: str('Interpreted evidence or specific correction/cancellation instructions.'), verification_ids: strings('For accepted: successful execution IDs. Older read-only evidence needs unchanged fingerprints of all declared inputs.'), report_reliable: { type: 'boolean', description: 'For accepted: explicitly confirm the whole final report is reliable. Do not set true when excluding errors; request a corrected report instead.' }, assessments: { type: 'array', maxItems: 16, description: 'For accepted: one explicit assertion per report criterion. Reading a failed log successfully does not make its criterion pass.', items: object({ criterion: str('Report criterion identifier (text before its colon).'), passed: { type: 'boolean', description: 'Whether the criterion is satisfied, distinct from execution success.' }, expected: str('Required outcome.'), observed: str('Actual facts in the execution result.'), interpretation: str('Why these facts satisfy or fail the criterion.'), scope: str('Version and coverage limits; name dependencies not checked.'), verification_ids: strings('Successful execution IDs supporting this assertion.') }) } }, ['task_id', 'verdict', 'evidence']), async (args, exec) => {
@@ -365,6 +405,12 @@ export function apply(ctx, config) {
         if (new Set(assessments.map(item => item.criterion)).size !== ids.length) throw new Error('Every criterion must be assessed exactly once');
       }
       const record = { version: 1, kind: 'review', taskId: assignment.taskId, verdict, reportId: assignment.report?.id ?? null, reportReliable: verdict === 'accepted', verificationIds, assessments, evidence: text(args.evidence, 'evidence') };
+      if (assignment.backend === 'team') {
+        const latest = teams().getTask(agent, assignment.teamTaskId);
+        if (verdict === 'accepted' && latest.status !== 'completed') throw new Error('Native Team work has not been submitted; completed still requires independent Mentor acceptance.');
+        if (verdict === 'rework' && latest.status === 'completed') await teams().updateTask(agent, { taskId: latest.id, expectedRevision: latest.revision, action: 'reopen' });
+        if (verdict === 'cancelled' && latest.status !== 'deleted') await teams().updateTask(agent, { taskId: latest.id, expectedRevision: latest.revision, action: 'delete' });
+      }
       const messageId = await send(assignment.childId, record, exec.signal);
       if (verdict === 'cancelled') ctx.subagents.interrupt(assignment.childId, { kind: 'ancestor', agent });
       return { record, messageId };

@@ -131,7 +131,8 @@ function harness(overrides = {}) {
     llm: {
       listProviders: () => [{ id: 'deepseek-account' }, { id: 'openai-codex' }],
       listModels: async provider => provider === 'deepseek-account' ? [{ id: 'deepseek-flash' }] : [{ id: 'gpt-6.1-sol' }],
-      resolveCallConfig: async config => config
+      resolveCallConfig: async config => config,
+      resolveModelInfo: async (provider, id) => ({ provider, id })
     },
     subagents: {
       startContinuable: async spec => {

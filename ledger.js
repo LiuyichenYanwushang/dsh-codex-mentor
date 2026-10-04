@@ -92,10 +92,10 @@ function update(state, record, seq) {
     case 'assignment': task = { ...previous, ...record, status: record.provisioning ? 'provisioning' : (!previous.status || previous.status === 'provisioning') ? 'implementing' : previous.status, seq }; break;
     case 'report':
       if (record.childId !== previous.childId) return state;
-      task = { ...previous, status: record.status, report: record, seq }; break;
+      task = { ...previous, status: record.id && (previous.guidance?.reportId === record.id || (previous.review?.verdict === 'rework' && previous.review.reportId === record.id)) ? previous.status : record.status, report: record, awaitingSettlements: ['blocked', 'ready-review'].includes(record.status) ? [...(previous.awaitingSettlements ?? []), record.id ?? `report-${seq}`] : previous.awaitingSettlements ?? [], seq }; break;
     case 'verify': task = { ...previous, verifications: [...(previous.verifications ?? []), { ...record, seq }].slice(-32), seq }; break;
     case 'stopped': task = { ...previous, status: 'stopped', lastStop: record, seq }; break;
-    case 'guidance': task = { ...previous, status: 'implementing', guidance: record, guidanceCount: (previous.guidanceCount ?? 0) + 1, guidanceKinds: { ...(previous.guidanceKinds ?? {}), [record.purpose ?? 'task-guidance']: (previous.guidanceKinds?.[record.purpose ?? 'task-guidance'] ?? 0) + 1 }, seq }; break;
+    case 'guidance': task = { ...previous, status: record.reportId && previous.report?.id && record.reportId !== previous.report.id ? previous.status : 'implementing', guidance: record, guidanceCount: (previous.guidanceCount ?? 0) + 1, guidanceKinds: { ...(previous.guidanceKinds ?? {}), [record.purpose ?? 'task-guidance']: (previous.guidanceKinds?.[record.purpose ?? 'task-guidance'] ?? 0) + 1 }, seq }; break;
     case 'review': task = { ...previous, status: record.verdict === 'rework' ? 'implementing' : record.verdict, review: record, reworkCount: (previous.reworkCount ?? 0) + (record.verdict === 'rework' ? 1 : 0), seq }; break;
     default: return state;
   }
@@ -150,17 +150,23 @@ export function fold(state, event) {
   }
   if (!state.parentId && message.source?.kind === 'subagent-settled') {
     const task = state.tasks.find(item => item.childId === message.source.senderSessionId);
-    if (!task || [...TERMINAL, 'blocked', 'ready-review'].includes(task.status)) return state;
+    if (!task || (message.id && task.handledSettlements?.includes(message.id))) return state;
+    const successful = message.source.summary === `Background subagent ${task.childId} finished and will do no further work unless you send it more.`;
+    if (successful && task.awaitingSettlements?.length) {
+      return { ...state, tasks: state.tasks.map(item => item === task ? { ...task, awaitingSettlements: task.awaitingSettlements.slice(1), handledSettlements: message.id ? [...(task.handledSettlements ?? []), message.id].slice(-32) : task.handledSettlements ?? [] } : item) };
+    }
+    if ([...TERMINAL, 'blocked', 'ready-review'].includes(task.status)) return state;
     return update(state, { version: 1, kind: 'stopped', taskId: task.taskId, summary: 'Worker stopped without a reviewable report', nativeSummary: message.source.summary }, event.seq);
   }
   if (message.source?.kind === 'codex-mentor-ledger') return update(state, message.source.record, event.seq);
   const record = decode(message.content);
   if (!record) return state;
   const source = message.source;
-  if (source?.kind === 'agent-message' && source.form === 'relay') {
-    if (state.parentId && source.senderSessionId === state.parentId && ['guidance', 'review'].includes(record.kind)) return update(state, record, event.seq);
-    const task = state.tasks.find(task => task.taskId === record.taskId && task.childId === source.senderSessionId);
-    if (!state.parentId && task && record.kind === 'report') return update(state, { ...record, childId: source.senderSessionId }, event.seq);
+  const sender = source?.kind === 'agent-message' && source.form === 'relay' ? source.senderSessionId : source?.kind === 'team-message' && source.teamId === (state.parentId ?? state.sessionId) ? source.senderId : null;
+  if (sender) {
+    if (state.parentId && sender === state.parentId && ['guidance', 'review'].includes(record.kind)) return update(state, record, event.seq);
+    const task = state.tasks.find(task => task.taskId === record.taskId && task.childId === sender);
+    if (!state.parentId && task && record.kind === 'report') return update(state, { ...record, childId: sender }, event.seq);
   }
   // Spawn's initial self-contained assignment is an ordinary user input in a fresh child.
   if (state.parentId && !state.tasks.length && source?.kind === 'user' && record.kind === 'assignment' && record.parentId === state.parentId) return update(state, { ...record, childId: state.sessionId }, event.seq);
@@ -178,7 +184,7 @@ export function contextText(state) {
     activeTasks: data.activeTasks.map(task => ({ taskId: task.taskId, status: task.status })),
     historyMeaning: 'tasks/activeTasks are active work; recentTaskSummaries and lastCompletedRun preserve history. Empty active tasks does not mean no prior collaboration.',
     tasks: data.tasks.filter(task => !TERMINAL.includes(task.status)).map(task => ({
-      taskId: task.taskId, childId: task.childId, goal: task.goal?.slice(0, 400), writeScope: task.writeScope, acceptance: task.acceptance?.slice(0, 400), status: task.status,
+      taskId: task.taskId, childId: task.childId, backend: task.backend ?? 'subagent', teamName: task.teamName, teamTaskId: task.teamTaskId, reasoningEffort: task.route?.reasoningEffort, goal: task.goal?.slice(0, 400), writeScope: task.writeScope, acceptance: task.acceptance?.slice(0, 400), status: task.status,
       blocker: task.report?.status === 'blocked' ? task.report.question?.slice(0, 500) : undefined,
       evidence: task.report?.evidence?.slice(0, 500), next: task.guidance?.nextSteps?.slice(0, 700),
       validation: task.guidance?.validation?.slice(0, 400)

@@ -17,6 +17,20 @@ DSH 0.2.0-rc.2 的独立模式 bundle。非 OpenAI/DeepSeek 官方产品；提�
 
 Flash 默认自动选择已配置且目录中包含 `deepseek-flash`（显示名 DeepSeek-V41-Flash）的 `deepseek-account`，其次 `deepseek-official`。选择发生在派工前，实际路由写入子会话描述和任务记录；推理失败不会自动换成 GPT，也不会切换账户。其他 provider 可以通过 `codex-mentor-host` 配置显式指定。缺凭据时在 Settings → Models 配置；目录可用不是推理成功的证明。
 
+## 0.6：原生智能体团队
+
+开启 DSH 的 **智能体团队** 插件后，导师模式默认采用原生 Teams：Codex/GPT 是唯一 Lead，`mentor_delegate` 创建固定 Flash 成员、原生名单和关联任务；原生消息负责耐久投递，导师协议负责求助、指导和独立验收。人数及每个成员的 `reasoning_effort` 由导师按任务决定，不固定为两人或三人；可选程度由 `mentor_status` 返回适配器的真实能力，也可明确选择 `default`。关闭 Teams 时保留 continuable Flash 子代理路径；不更改其他模式或全局模型。
+
+**原生接口依赖：** 原版 DSH `0.2.0-rc.2` 的 Teams 接口不能指定成员模型，会继承 Lead。本仓库提供可选的[原生接口补丁说明](<runtime-patches/README.md>)，不是另一个修复插件。明确同意修改运行时时，在停止 DSH 后执行：
+
+```bash
+node scripts/patch-native-teams.mjs --runtime /absolute/path/to/@deepseek-ai/dsh
+```
+
+补丁逐文件核对原版/已修补版 SHA-256，版本或内容不符即在写入前拒绝；无安装脚本自动修改运行时。需要启动新 DSH 进程。导师只在原生 `supportsAgentOptions === true` 时创建团队，否则转能力诊断，绝不把继承 GPT 的队员称为 Flash，也不静默退回另一后端。DSH 升级可能覆盖此可选补丁。
+
+原生任务 `completed` 表示 Flash 已提交工作，**不是**导师 `accepted`；正式 Evidence Gate 和独立检查仍必需。返工/报告纠正会重新打开原生任务。团队路径不受子代理的三成员/单-worker概览预算约束，仍受原生 Teams 的成员上限（默认每个 Team 生命周期最多 16 个永久名字）、写范围冲突检查和任务账本容量约束。成员活跃/空闲也不是验收状态。
+
 ## 0.5：减少流程摩擦
 
 - 父 run 绑定会话和输入身份；同一用户输入的日志/队列重放不会重新 begin。新请求归档 `lastCompletedRun`，状态同时暴露 `activeRun`、`activeTasks`、`recentTaskSummaries` 和上一轮统计。
@@ -25,7 +39,7 @@ Flash 默认自动选择已配置且目录中包含 `deepseek-flash`（显示名
 - `mentor_wait` 使用原生结束当前 turn 来让出执行，报告到达后继续；它不是 Agent Teams，也不是轮询或额外计时器。
 - `mentor_verify` 区分 `executionSucceeded` 与尚未判定的 `criterionSatisfied`；`mentor_review accepted` 必须对每个报告 criterion 记录 expected/observed/interpretation/scope 和检查 ID，并明确整份报告可靠。不支持模糊的“整体接受、附带错误不采用”，须重交修正报告。
 - 可用 `input_paths` 对证据依赖文件在执行前后做 SHA-256；只读文件读取、实际读取目标包含在指纹集合中、执行目录和内容未变且导师确认 claim/依赖范围相符时可复用报告前的检查。Shell 测试、网络和搜索证据暂不跨报告自动复用：依赖范围无法安全推断。未声明文件、环境、网络状态及新 claim 不在指纹保证范围内。指纹仍通过原生 Shell 权限执行，不绕过沙箱。
-- `task_kind: overview` 限为一个 worker；提示词要求关键 claim 抽样、版本一致性与停止条件，禁止把概览默认扩大成审计。工作流统计只在工具元数据中展示，不再修改 final 正文。
+- 子代理后端的 `task_kind: overview` 限为一个 worker；原生 Teams 后端人数由导师决定；提示词要求关键 claim 抽样、版本一致性与停止条件，禁止把概览默认扩大成审计。工作流统计只在工具元数据中展示，不再修改 final 正文。
 
 原生 DSH 当前没有禁用 settlement 唤醒的 API；插件只能减少冗余模型请求，不能取消所有原生空 turn/后台通知。M14 暂不增加目录工具，优先使用窄范围发现；复杂断言质量仍取决于导师判断。
 
@@ -53,11 +67,11 @@ Flash 上下文能力为 1,000,000 token，输出能力按用户指定的 384k �
 ## 协作
 
 - GPT 用 `mentor_delegate` 派工；每个任务有独立 id、写范围、验收标准和固定 Flash 路由。可附不变量、接口、失败测试、开放问题和数学模型，保留 worker 的实现自主权。
-- Flash 用 `mentor_report` 汇报；blocked 必须包含尝试、证据、具体问题，blocked 和 ready-review 会结束当前执行轮次。
+- Flash 用 `mentor_report` 汇报；blocked 必须包含尝试、证据、具体问题，blocked 和 ready-review 会结束当前执行轮次。快速指导与本地报告提交、旧 turn 结束通知交错时，账本按报告 ID 保留新指导，不把旧通知冒充新任务停止。
 - GPT 用 `mentor_guide` 给出诊断、下一步、验证标准、失败分支；投递给正在运行或可恢复的直接子会话。
 - ready-review 必须通过 Evidence Gate：改动、检查、每个验收标准结果、偏离、假设和风险；GPT 用 `mentor_verify` 实际运行独立检查，并把返回的 `verification_ids` 交给 `mentor_review` 接受、要求返工或取消。缺少实际检查、失败检查、已变化的旧证据、仍在后台运行的检查都不能接受；成功执行不等于 criterion 通过，检查覆盖与语义断言仍由导师判断。所有终态同步给 worker 并阻止其继续执行；ready-review 不等于 accepted。
 - `mentor_status` 默认返回紧凑目录，传 `task_id` 获取完整任务证据；`mentor_memory` 保存任务检查点或带验证状态的会话笔记。
-- 默认最多 3 个未验收任务，同一个会话最多 64 个任务、20 条笔记；默认不允许递归派工。
+- 子代理路径默认最多 3 个未验收任务；原生 Teams 路径由导师决定人数，受原生成员上限约束。同一个会话最多 64 个任务、20 条笔记；默认不允许递归派工。
 
 空写范围任务采用只读工具白名单，禁止文件修改、Shell 和其他未列明工具，恢复后仍生效。非空写范围是派工协议和冲突检查，不是额外的 OS 文件沙箱；它会拒绝明显重叠的未结束任务，但不能识别符号链接别名，Shell 也未被限制到这些路径。真正的文件权限仍由 DSH 沙箱控制。父子共享工作目录，导师仍须审查 diff。取消请求不是停止完成；仍运行的子任务继续占用派工/写范围预算。
 

@@ -11,6 +11,6 @@ export function apply(ctx) {
   ctx.systemPrompt.context({ name: 'codex-mentor:capabilities', order: 840, text: ({ agent }) => {
     if (!agent) return '';
     const status = toolReadiness(agent, ctx.tools);
-    return `Codex Mentor capability state: ${JSON.stringify(status)}. Selection is not readiness or worker startup. If tools are missing, disclose what cannot run BEFORE working; ask whether to repair, explicitly switch to direct execution, or only diagnose. Never substitute Agent Teams.`;
+    return `Codex Mentor capability state: ${JSON.stringify(status)}. Selection is not readiness or worker startup. If tools are missing, disclose what cannot run BEFORE working; ask whether to repair, explicitly switch to direct execution, or only diagnose. Native Agent Teams is valid only through the ready Mentor integration; never substitute untracked teammates for missing Mentor tools.`;
   } });
 }
