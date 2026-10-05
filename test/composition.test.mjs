@@ -32,7 +32,7 @@ test('every active preset plugin satisfies its installed native Config schema', 
   assert.ok(validated.includes('mentor-compaction'));
 });
 
-test('one portable bundle contains the versioned Host and declares Codex Connect', async () => {
+test('one portable bundle contains the versioned Host, current-model leader and optional Codex Connect', async () => {
   const patchUrl = new URL('../cordis.patch.yml', import.meta.url);
   const patches = yaml.load(await readFile(patchUrl, 'utf8'), { schema });
   const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
@@ -42,5 +42,14 @@ test('one portable bundle contains the versioned Host and declares Codex Connect
   const wrapper = await readFile(entry, 'utf8');
   assert.ok(wrapper.includes(`./index.js?mentor=${pkg.version}`), 'upgrades must load a fresh Host module');
   assert.ok(pkg.peerDependencies['dsh-codex-connect']);
+  assert.equal(pkg.peerDependenciesMeta['dsh-codex-connect'].optional, true);
+  assert.equal(host.config.requireGptMentor, false); assert.equal(host.config.workerBackend, 'auto');
+  const { Config } = await import('../index.js');
+  assert.equal(Config().requireGptMentor, false); assert.equal(Config().workerBackend, 'auto');
+  for (const value of ['auto', 'subagent', 'team']) assert.equal(Config({ workerBackend: value }).workerBackend, value);
+  assert.throws(() => Config({ workerBackend: 'unknown' }));
+  const preset = await readPreset();
+  assert.equal(preset.config.id, 'codex-mentor'); assert.match(preset.config.name, /^Mentor/);
+  assert.ok(!preset.config.plugins.some(row => row.name === '@deepseek-ai/dsh-agent-default-model'), 'no preset-level model override');
   assert.ok(!JSON.stringify(patches).includes('file:///'), 'no hard-coded profile or machine path');
 });

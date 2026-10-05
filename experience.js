@@ -1,5 +1,5 @@
-import { TERMINAL } from './ledger.js?mentor=0.7.0';
-export { DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './ledger.js?mentor=0.7.0';
+import { TERMINAL } from './ledger.js?mentor=0.8.0';
+export { DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './ledger.js?mentor=0.8.0';
 
 export function effectiveCapabilities(writeScope) {
   const writable = writeScope.length > 0;

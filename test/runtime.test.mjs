@@ -41,7 +41,7 @@ function until(ctx, agent, predicate, action) {
 
 class ScriptedAdapter extends LlmAdapter {
   constructor(ctx) { super(); this.ctx = ctx; this.steps = new Map(); this.calls = []; }
-  async listModels(provider) { return [{ provider, id: provider === 'openai-codex' ? 'gpt-6.1-sol' : 'deepseek-flash', name: 'Scripted test model' }]; }
+  async listModels(provider) { return (provider === 'openai-codex' ? ['gpt-6.1-sol'] : ['deepseek-flash', 'deepseek-chat']).map(id => ({ provider, id, name: 'Scripted test model' })); }
   async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 1000000 } }; }
   stream(options) {
     this.calls.push({ provider: options.provider, model: options.model, sessionId: options.sessionId });
@@ -162,7 +162,7 @@ test('activating the Host after a mentor session exists repairs its actual tool 
   } finally { await ctx.fiber.dispose(); }
 });
 
-test('native two-worker audit performs blocked guidance, real checks, independent acceptance and durable replay', { timeout: 10000 }, async () => {
+test('native two-worker audit switches a non-Codex Leader midrun, retaining pinned Flash workers, independent acceptance and replay', { timeout: 10000 }, async t => {
   const ctx = await kernel(), readActors = [], tempRoot = await mkdtemp(join(tmpdir(), 'dsh-mentor-native-'));
   try {
     const persistence = await import('@deepseek-ai/dsh-session-persistence-jsonl');
@@ -175,22 +175,85 @@ test('native two-worker audit performs blocked guidance, real checks, independen
     ctx.llm.registerAdapter(['openai-codex', 'deepseek-official'], adapter);
     ctx.tools.register({ name: 'read', description: 'Read the test contract fixture.', parameters: { type: 'object', properties: { file_path: { type: 'string' } }, required: ['file_path'], additionalProperties: false }, output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] }, execute: async (args, exec) => { assert.equal(args.file_path, fixture); readActors.push(exec.agent.id); return { text: await readFile(fixture, 'utf8') }; } });
     ctx.tools.register({ name: 'spawn_teammate', description: 'Competing delegation fixture.', parameters: { type: 'object' }, output: { schema: { type: 'object' }, render: () => [] }, execute: async () => { throw new Error('Must not be invoked'); } });
-    const handle = await ctx.agents.create({ sessionId: 'native-two-worker-audit', agentOptions: { provider: 'openai-codex', model: 'gpt-6.1-sol' }, setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'codex-mentor'); } });
+    const originalChoice = { provider: 'deepseek-official', model: 'deepseek-chat' }, codexChoice = { provider: 'openai-codex', model: 'gpt-6.1-sol' };
+    let currentChoice = originalChoice, switchedAt, switchState;
+    const requests = [];
+    const handle = await ctx.agents.create({ sessionId: 'native-two-worker-audit', agentOptions: originalChoice, setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'codex-mentor'); } });
+    handle.agent.ctx.on('agent/request', async ({ agent, signal }, next) => {
+      assert.equal(agent, handle.agent, 'picker listener is root-scoped, never inherited by workers');
+      assert.ok(signal instanceof AbortSignal);
+      const choice = currentChoice;
+      const config = await next();
+      assert.ok(Object.isFrozen(config), 'native next() returns the current frozen configuration');
+      assert.ok(!('messages' in config), 'request waterfall selects configuration, not message content');
+      requests.push({ config, choice });
+      return { ...config, ...choice };
+    });
+    const offPicker = ctx.on('session/event', session => {
+      if (session.id !== handle.agent.id || switchedAt) return;
+      const state = stateOf(ctx, handle.agent);
+      if (!state.tasks.some(task => task.status === 'ready-review')) return;
+      switchState = structuredClone(state);
+      switchedAt = { calls: adapter.calls.length, requests: requests.length };
+      currentChoice = codexChoice; // Simulate changing this session's model picker, not Agent.options.
+    });
     assert.equal(ctx.tools.get('spawn_teammate', handle.agent), undefined);
     await until(ctx, handle.agent, state => state.tasks.length === 2 && state.tasks.every(task => task.status === 'accepted'), () => handle.agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Perform two independent read-only investigations of the fixture.' }] })));
     await ctx.subagents.drainContinuableDescendants([handle.agent]);
     await handle.agent.whenIdle();
+    offPicker();
     const actual = stateOf(ctx, handle.agent), facts = cooperation(actual);
+    assert.ok(switchedAt, 'the first ready report changed the local picker');
+    assert.equal(switchState.tasks.length, 2);
+    assert.equal(actual.sessionId, switchState.sessionId);
+    assert.equal(actual.run.runId, switchState.run.runId);
+    assert.equal(actual.run.backend, 'subagent');
+    assert.deepEqual(actual.run.route, switchState.run.route);
+    const assignment = task => ({ taskId: task.taskId, childId: task.childId, parentId: task.parentId, runId: task.runId, backend: task.backend, goal: task.goal, writeScope: task.writeScope, criteria: task.criteria, route: task.route });
+    assert.deepEqual(actual.tasks.map(assignment), switchState.tasks.map(assignment), 'model selection preserves task/child IDs, parent, contract, backend and original worker route');
+    for (const task of switchState.tasks.filter(task => task.status === 'ready-review')) assert.deepEqual(actual.tasks.find(item => item.taskId === task.taskId).report, task.report, 'the first submitted report survives Leader switching and acceptance');
     assert.equal(facts.delegated, 2); assert.equal(facts.accepted, 2); assert.equal(facts.guidance, 1);
     assert.equal(facts.independentChecks, 2); assert.equal(facts.outstanding.length, 0);
     for (const task of actual.tasks) {
       assert.deepEqual(task.criteria.map(({ id }) => id), ['AC1', 'AC2']);
       assert.deepEqual(task.report.evidenceGate.criteria.map(({ id, status }) => ({ id, status })), [{ id: 'AC1', status: 'PASS' }, { id: 'AC2', status: 'PASS' }]);
       assert.deepEqual(task.review.assessments.map(({ criterion }) => criterion), ['AC1', 'AC2']);
+      assert.equal(task.verifications.length, 1);
+      const check = task.verifications[0];
+      assert.equal(check.readyReportId, task.report.id);
+      assert.equal(check.executionSucceeded, true); assert.equal(check.criterionSatisfied, null, 'reading the fixture is not itself acceptance');
+      assert.equal(task.review.reportId, task.report.id); assert.equal(task.review.reportReliable, true);
+      assert.deepEqual(task.review.verificationIds, [check.id]);
+      for (const assessment of task.review.assessments) {
+        assert.equal(assessment.criterionSatisfied, true);
+        assert.deepEqual(assessment.verificationIds, [check.id]);
+        assert.ok(assessment.observed && assessment.interpretation && assessment.scope);
+      }
     }
     assert.equal(readActors.filter(id => id === handle.agent.id).length, 2, 'mentor really ran two independent checks');
-    assert.equal(new Set(adapter.calls.filter(call => call.model === 'deepseek-flash').map(call => call.sessionId)).size, 2);
-    assert.ok(adapter.calls.every(call => call.model === (call.provider === 'openai-codex' ? 'gpt-6.1-sol' : 'deepseek-flash')));
+    const rootCalls = adapter.calls.filter(call => call.sessionId === handle.agent.id), routeOf = ({ provider, model }) => ({ provider, model });
+    const before = adapter.calls.slice(0, switchedAt.calls).filter(call => call.sessionId === handle.agent.id), after = adapter.calls.slice(switchedAt.calls).filter(call => call.sessionId === handle.agent.id);
+    assert.ok(before.length && after.length, 'actual root adapter calls exist on both sides of the picker change');
+    assert.ok(before.every(call => call.provider === originalChoice.provider && call.model === originalChoice.model));
+    assert.ok(after.every(call => call.provider === codexChoice.provider && call.model === codexChoice.model), 'the next admitted root request uses the returned replacement');
+    assert.deepEqual(rootCalls.map(routeOf), requests.map(({ choice }) => choice));
+    assert.deepEqual(routeOf(requests[0].config), originalChoice, 'default mentor configuration retains the session selection');
+    assert.deepEqual(routeOf(requests[switchedAt.requests].config), originalChoice, 'next() still exposes the previously committed route at the switch');
+    assert.deepEqual(routeOf(requests[switchedAt.requests + 1].config), codexChoice, 'later next() exposes the replacement committed by the native loop');
+    const workerCalls = adapter.calls.filter(call => call.sessionId !== handle.agent.id);
+    assert.equal(new Set(workerCalls.map(call => call.sessionId)).size, 2);
+    for (const call of workerCalls) {
+      const task = actual.tasks.find(item => item.childId === call.sessionId);
+      assert.ok(task, 'every adapter worker call belongs to the original assignment');
+      assert.deepEqual(routeOf(call), routeOf(task.route));
+      assert.deepEqual(routeOf(call), { provider: 'deepseek-official', model: 'deepseek-flash' });
+    }
+    t.diagnostic('Actual root adapter calls before picker change: ' + JSON.stringify(before));
+    t.diagnostic('Actual root adapter calls after picker change: ' + JSON.stringify(after));
+    const headers = handle.agent.session.snapshotEvents().filter(event => event.type === 'request/header');
+    assert.deepEqual(routeOf(headers[0].data.header.config), originalChoice);
+    assert.ok(headers.some(event => event.data.reason === 'change' && event.data.header.config.provider === codexChoice.provider && event.data.header.config.model === codexChoice.model), 'the replacement is durably logged by the native loop');
+    assert.deepEqual(routeOf(headers.at(-1).data.header.config), codexChoice);
     const replay = handle.agent.session.snapshotEvents().reduce(fold, initial(handle.agent.session.header));
     assert.deepEqual(view(replay), view(actual));
     const messages = handle.agent.session.snapshotEvents().filter(event => event.type === 'assistant/message').map(event => event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join(''));
@@ -205,6 +268,9 @@ test('native two-worker audit performs blocked guidance, real checks, independen
     catch (error) { error.message += '\nLifecycle rows: ' + JSON.stringify(handle.agent.session.snapshotEvents().filter(e => ['turn/start', 'turn/end', 'step/start', 'step/end'].includes(e.type)).map(e => ({ seq: e.seq, type: e.type, data: e.data }))); throw error; }
     assert.ok(ctx.tools.get('mentor_delegate', resumed.agent));
     assert.deepEqual(cooperation(stateOf(ctx, resumed.agent)), facts, 'cold JSONL resume preserves genuine task/worker/check facts');
+    assert.deepEqual(view(stateOf(ctx, resumed.agent)), view(actual), 'cold resume preserves the same parent, run, assignments, reports, criteria and reviews');
+    assert.deepEqual(routeOf(resumed.agent.session.requestHeader().config), codexChoice, 'cold resume retains the selected Leader route without a live picker listener');
+    assert.equal(adapter.calls.filter(call => call.model === 'deepseek-flash').length, 5);
     await resumed.dispose();
   } finally {
     await ctx.fiber.dispose();

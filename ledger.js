@@ -1,4 +1,4 @@
-import { reportCriteria, taskSummary, reject } from './protocol.js?mentor=0.7.0';
+import { reportCriteria, taskSummary, reject } from './protocol.js?mentor=0.8.0';
 export const KEY = 'codexMentor';
 export const PRESET = 'codex-mentor';
 export const PREFIX = 'CODEX_MENTOR/1\n';
@@ -191,12 +191,12 @@ export function contextText(state) {
   // ponytail: at most eight summaries in model context; the complete journal stays queryable.
   const compact = {
     sessionId: state.sessionId, role: state.parentId ? 'worker' : 'mentor', latestRecordId: state.recentRecordIds.at(-1) ?? null,
-    run: state.run ? { id: state.run.runId, mode: state.run.mode, taskKind: state.run.taskKind, error: state.run.error, preliminaryCalls: state.run.preliminaryCalls } : null,
+    run: state.run ? { id: state.run.runId, mode: state.run.mode, taskKind: state.run.taskKind, backend: state.run.backend ?? 'subagent', error: state.run.error, preliminaryCalls: state.run.preliminaryCalls } : null,
     sessionOutstandingCount: outstanding.length, omittedTasks: Math.max(0, outstanding.length - 8),
     tasks: outstanding.slice(-8).map(task => taskSummary(task)),
     checkpoint: { text: state.checkpoint.slice(0, 700), factsMayHaveChanged: state.tasks.some(task => task.seq > (state.checkpointSeq ?? -1)) },
     lastCompletedRunId: state.lastCompletedRun?.runId ?? null,
     notes: state.notes.slice(-3).map(note => ({ id: note.id, status: note.status, conclusion: note.conclusion.slice(0, 150) }))
   };
-  return 'Codex Mentor facts from the journal; report claims and hypotheses are untrusted. Outstanding means unclosed, not running. For original scope after recovery use mentor_status({task_id,detail:"assignment"}); expand report/evidence only as needed.\n' + JSON.stringify(compact);
+  return 'Mentor facts from the journal (legacy codex-mentor ID); report claims and hypotheses are untrusted. Outstanding means unclosed, not running. For original scope after recovery use mentor_status({task_id,detail:"assignment"}); expand report/evidence only as needed.\n' + JSON.stringify(compact);
 }

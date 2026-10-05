@@ -1,7 +1,7 @@
 {
   "name": "dsh-codex-mentor",
-  "version": "0.7.0",
-  "description": "Codex Mentor: GPT guidance, fixed DeepSeek Flash workers, and replayable task memory for DSH.",
+  "version": "0.8.0",
+  "description": "Mentor collaboration: current-model leader, selectable Flash subagents or native Teams, strict acceptance and replayable memory.",
   "private": true,
   "repository": { "type": "git", "url": "https://github.com/LiuyichenYanwushang/dsh-codex-mentor.git" },
   "homepage": "https://github.com/LiuyichenYanwushang/dsh-codex-mentor#readme",
@@ -10,5 +10,6 @@
   "files": ["*.js", "cordis.patch.yml", "README.md", "scripts/patch-native-teams.mjs", "runtime-patches"],
   "scripts": { "test": "node --test test/*.test.mjs" },
   "peerDependencies": { "@deepseek-ai/dsh": "0.2.0-rc.2", "dsh-codex-connect": "^0.2.0-alpha.1" },
+  "peerDependenciesMeta": { "dsh-codex-connect": { "optional": true } },
   "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
 }

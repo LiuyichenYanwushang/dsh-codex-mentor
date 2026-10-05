@@ -213,7 +213,7 @@ test('mentor -> blocked worker -> concrete guidance -> ready-review -> acceptanc
   const check = await h.call(mentor, 'mentor_verify', { task_id: taskId, tool: 'read', arguments: { file_path: 'src/parser.js' }, label: 'Independent contract check' });
   await h.call(mentor, 'mentor_review', { task_id: taskId, verdict: 'accepted', verification_ids: [check.checkId], evidence: 'Reviewed diff; reran parser test: PASS' });
   assert.equal(h.state(mentor).tasks[0].status, 'accepted');
-  assert.ok(contextText(h.state(mentor)).includes('Codex Mentor'));
+  assert.ok(contextText(h.state(mentor)).includes('Mentor facts'));
 });
 
 test('replay survives surface compaction and reconstructs guidance/checkpoints', async () => {
@@ -239,6 +239,47 @@ test('scope overlap, unsafe paths, unauthorized facts and foreign sessions fail 
   const before = h.state(mentor);
   h.append(mentor, 'user/message', { source: { kind: 'user' }, content: [{ type: 'text', text: encode({ kind: 'report', taskId: record.taskId, childId: record.childId, status: 'ready-review' }) }] });
   assert.equal(h.state(mentor), before, 'ordinary user text cannot forge worker status');
+});
+
+test('leader uses session selection by default; Codex-only is explicit opt-in', async () => {
+  const flexible = harness(), leader = await flexible.makeAgent('any-model-leader');
+  assert.equal(Config().requireGptMentor, false);
+  assert.equal(leader.localHandlers.has('agent/request'), false, 'mentor adds no model override or Codex gate');
+  const locked = harness({ requireGptMentor: true }), old = await locked.makeAgent('locked-leader');
+  const request = old.localHandlers.get('agent/request');
+  await assert.rejects(request({}, async () => ({ provider: 'deepseek-official', model: 'deepseek-chat' })), /requires a GPT model/);
+  const chosen = { provider: 'openai-codex', model: 'gpt-6.1-sol' };
+  assert.deepEqual(await request({}, async () => chosen), chosen);
+});
+
+test('explicit subagent backend bypasses enabled Teams readiness and never migrates existing workers', async () => {
+  const h = harness({ workerBackend: 'subagent' });
+  h.ctx.get = name => name === 'agentTeams' ? { supportsAgentOptions: false } : undefined;
+  const leader = await h.makeAgent('subagent-choice');
+  h.append(leader, 'user/message', { id: 'first-human-request', source: { kind: 'user' }, content: [{ type: 'text', text: 'Original run' }] });
+  const begin = await h.call(leader, 'mentor_begin', { mode: 'collaborative', task: 'Keep plain workers' });
+  assert.equal(begin.record.backend, 'subagent'); assert.equal(begin.record.mode, 'collaborative');
+  const { record } = await h.call(leader, 'mentor_delegate', { goal: 'Bounded source check', write_scope: [], acceptance: 'Sourced answer' });
+  assert.equal(record.backend, 'subagent'); assert.equal(record.route.model, 'deepseek-flash');
+  const prior = snapshotJsonValue(h.state(leader));
+  const repeat = await h.call(leader, 'mentor_begin', { mode: 'collaborative', task: 'Keep plain workers' });
+  assert.equal(repeat.run.runId, begin.record.runId);
+  await assert.rejects(h.call(leader, 'mentor_begin', { mode: 'collaborative', task: 'Do not migrate', backend: 'team' }), /BACKEND_ALREADY_SELECTED/);
+  assert.deepEqual(h.state(leader), prior);
+  const newInput = { id: 'next-human-request', source: { kind: 'user' }, content: [{ type: 'text', text: 'Different run' }] };
+  h.append(leader, 'user/message', newInput);
+  await assert.rejects(h.call(leader, 'mentor_begin', { mode: 'collaborative', task: 'Different run', backend: 'team' }), /BACKEND_ALREADY_SELECTED/);
+  assert.equal(h.state(leader).tasks[0].backend, 'subagent');
+});
+
+test('new-run backend override is explicit and unavailable team fails closed without a child', async () => {
+  const h = harness(), leader = await h.makeAgent('backend-choice');
+  const unavailable = await h.call(leader, 'mentor_begin', { mode: 'collaborative', task: 'Native Team requested', backend: 'team' });
+  assert.equal(unavailable.record.backend, 'team'); assert.equal(unavailable.record.mode, 'diagnostic');
+  assert.match(unavailable.record.error, /TEAM_BACKEND_UNAVAILABLE/); assert.equal(h.agents.size, 1);
+  const chosen = await h.call(leader, 'mentor_begin', { mode: 'collaborative', task: 'Now choose plain workers', backend: 'subagent' });
+  assert.equal(chosen.record.backend, 'subagent'); assert.equal(chosen.record.mode, 'collaborative');
+  assert.equal(chosen.workerStarted, false);
 });
 
 test('worker catalog failure never creates a GPT fallback child', async () => {

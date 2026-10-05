@@ -4,9 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { scopeOf, scopeParentOf } from '@deepseek-ai/dsh-scope';
-import { KEY, PRESET, TERMINAL, initial, fold, view, contextText, encode, text, choice, list, argsObject } from './ledger.js?mentor=0.7.0';
-import { MENTOR, WORKER } from './prompts.js?mentor=0.7.0';
-import { toolReadiness, cooperation, effectiveCapabilities, BYPASS, DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './experience.js?mentor=0.7.0';
+import { KEY, PRESET, TERMINAL, initial, fold, view, contextText, encode, text, choice, list, argsObject } from './ledger.js?mentor=0.8.0';
+import { MENTOR, WORKER } from './prompts.js?mentor=0.8.0';
+import { toolReadiness, cooperation, effectiveCapabilities, BYPASS, DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './experience.js?mentor=0.8.0';
 
 export const name = 'codex-mentor';
 export const inject = ['tools', 'systemPrompt', 'sessionProjections', 'subagents', 'agents', 'agentPresets', 'llm'];
@@ -15,13 +15,14 @@ export const Config = z.object({
   workerModel: z.string().default('deepseek-flash'),
   workerMaxTokens: z.number().step(1).min(1024).max(384000).default(384000),
   maxConcurrentWorkers: z.number().step(1).min(1).max(8).default(3),
-  requireGptMentor: z.boolean().default(true)
+  requireGptMentor: z.boolean().default(false),
+  workerBackend: z.union([z.const('auto'), z.const('subagent'), z.const('team')]).default('auto')
 });
 const str = description => ({ type: 'string', description });
 const enumeration = (values, description) => ({ type: 'string', enum: values, description });
 const strings = description => ({ type: 'array', items: { type: 'string' }, description });
 const object = (properties, required = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false });
-import { reject, contractCriteria, reportCriteria, taskSummary, permissions, evidenceReuse } from './protocol.js?mentor=0.7.0';
+import { reject, contractCriteria, reportCriteria, taskSummary, permissions, evidenceReuse } from './protocol.js?mentor=0.8.0';
 const contractSchema = { type: 'array', items: object({ id: str('Immutable short ASCII ID, e.g. A.'), description: str('Exact bounded acceptance requirement.') }), description: '1–16 immutable criteria; omitted means one AC1 for acceptance. IDs, not titles, bind reports and assessments.' };
 const resultCriteriaSchema = { type: 'array', items: { oneOf: [object({ id: str('Exact assignment criterion ID.'), status: enumeration(['PASS', 'FAIL', 'UNVERIFIED'], 'Worker claim only, never mentor acceptance.'), evidence: str('Observed result or attributed source.'), scope: str('Coverage, source date/version and what was not verified.') }), str('Legacy tasks without fixed criteria only.') ] }, description: 'For ready-review: one structured result per immutable assignment ID. Put correction history in deviations, not extra criteria.' };
 
@@ -53,14 +54,18 @@ export function apply(ctx, config) {
     }
     throw new Error('Flash worker unavailable. ' + diagnostics.join('; ') + '. No GPT fallback was used.');
   }
+  function chooseBackend(selection = config.workerBackend ?? 'auto') {
+    const selected = choice(selection, 'backend', ['auto', 'subagent', 'team']);
+    return selected === 'auto' ? (ctx.get?.('agentTeams') ? 'team' : 'subagent') : selected;
+  }
   async function diagnostics(signal) {
     let worker;
     try { worker = { ready: true, route: await routes(signal), inferenceTested: false }; }
     catch (error) { worker = { ready: false, error: error.message }; }
     const providers = ctx.llm.listProviders();
-    const mentorModels = providers.some(item => item.id === 'openai-codex') ? await ctx.llm.listModels('openai-codex') : [];
+    const mentorModels = config.requireGptMentor && providers.some(item => item.id === 'openai-codex') ? await ctx.llm.listModels('openai-codex') : [];
     const presets = await ctx.agentPresets.list();
-    return { version: '0.7.0', backend: ctx.get?.('agentTeams') ? 'team' : 'subagent', nativeTeams: { enabled: !!ctx.get?.('agentTeams'), modelOptionsSupported: ctx.get?.('agentTeams')?.supportsAgentOptions === true }, flashCapabilities: { contextWindow: 1000000, maxOutputTokens: 384000, configuredOutputBudget: config.workerMaxTokens }, preset: presets.find(item => item.id === PRESET) ?? null, worker, mentor: { provider: 'openai-codex', models: mentorModels.map(item => item.id), inferenceTested: false }, liveSessions: (ctx.agents.list?.() ?? []).filter(agent => ctx.agentPresets.composedPreset(agent.ctx) === PRESET).map(agent => ({ sessionId: agent.id, role: agent.session.header.origin === 'subagent' ? 'worker' : 'mentor', ...toolReadiness(agent, ctx.tools), workerRouteReady: worker.ready, initializationError: failures.get(agent.id) ?? null, cooperation: cooperation(state(agent)) })), memory: 'Session-log projection; compression cannot erase recorded task facts. Session-scoped, not a cross-project vector database.' };
+    return { version: '0.8.0', backend: chooseBackend(), backendSelection: config.workerBackend ?? 'auto', nativeTeams: { enabled: !!ctx.get?.('agentTeams'), modelOptionsSupported: ctx.get?.('agentTeams')?.supportsAgentOptions === true }, flashCapabilities: { contextWindow: 1000000, maxOutputTokens: 384000, configuredOutputBudget: config.workerMaxTokens }, preset: presets.find(item => item.id === PRESET) ?? null, worker, mentor: { modelPolicy: config.requireGptMentor ? 'codex-gpt-only' : 'current-session', provider: config.requireGptMentor ? 'openai-codex' : null, models: mentorModels.map(item => item.id), selectableProviders: providers.map(item => item.id), switchable: true, switchAppliesAt: 'next-request', inferenceTested: false }, liveSessions: (ctx.agents.list?.() ?? []).filter(agent => ctx.agentPresets.composedPreset(agent.ctx) === PRESET).map(agent => ({ sessionId: agent.id, role: agent.session.header.origin === 'subagent' ? 'worker' : 'mentor', ...toolReadiness(agent, ctx.tools), workerRouteReady: worker.ready, initializationError: failures.get(agent.id) ?? null, cooperation: cooperation(state(agent)) })), memory: 'Session-log projection; compression cannot erase recorded task facts. Session-scoped, not a cross-project vector database.' };
   }
   ctx.inject(['cordisInspect'], inner => {
     inner.effect(() => inner.cordisInspect.register({
@@ -213,11 +218,12 @@ export function apply(ctx, config) {
       const own = state(agent);
       if (own.run) return own.run.backend ?? 'subagent';
       if (child && own.tasks[0]) return own.tasks[0].backend ?? 'subagent';
-      return ctx.get?.('agentTeams') ? 'team' : 'subagent';
+      return chooseBackend();
     }
     function teams() {
       const service = ctx.get?.('agentTeams');
-      if (service?.supportsAgentOptions !== true) throw new Error('Native Agent Teams needs the model-options API extension; no GPT teammate or subagent fallback was started.');
+      if (!service) reject('TEAM_BACKEND_UNAVAILABLE', 'Native Agent Teams is not enabled', 'Enable the native Teams integration or explicitly choose backend=subagent; no silent fallback');
+      if (service.supportsAgentOptions !== true) throw new Error('Native Agent Teams needs the model-options API extension; no GPT teammate or subagent fallback was started.');
       return service;
     }
     async function send(target, record, signal) {
@@ -316,20 +322,23 @@ export function apply(ctx, config) {
     }
     async function begin(args, exec) {
       const mode = choice(args.mode, 'mode', ['collaborative', 'simple', 'direct', 'diagnostic']);
-      const own = state(agent), readiness = toolReadiness(agent, ctx.tools);
-      if (own.run?.mode === mode && mode !== 'diagnostic') return { run: own.run, ...readiness };
+      const own = state(agent), readiness = toolReadiness(agent, ctx.tools), selectedBackend = chooseBackend(args.backend ?? config.workerBackend ?? 'auto');
+      if (own.run?.mode === mode && mode !== 'diagnostic') {
+        if (args.backend && args.backend !== 'auto' && selectedBackend !== (own.run.backend ?? 'subagent')) reject('BACKEND_ALREADY_SELECTED', 'This run already owns workers and messages through its original backend', 'Finish or explicitly close this run; select another backend only for a new run. Leader model switches do not change it', { current_backend: own.run.backend ?? 'subagent', requested_backend: selectedBackend });
+        return { run: own.run, ...readiness };
+      }
       if (own.tasks.some(item => !TERMINAL.includes(item.status))) throw new Error('Recover existing tasks with mentor_status; do not silently switch their execution mode.');
       if (mode === 'direct' && !own.consent) throw new Error(`Direct execution requires a real user answer. Use ask_user_question with question id "${DIRECT_QUESTION_ID}" and options "修复导师能力后继续", "${DIRECT_LABEL}", "只做能力诊断"; no answer or a skipped answer is not permission.`);
       let route = null, error = '';
       if (mode === 'collaborative' && readiness.toolsReady) {
-        try { if (ctx.get?.('agentTeams')) teams(); route = await routes(exec.signal); } catch (failure) { error = failure.message; }
+        try { if (selectedBackend === 'team') teams(); route = await routes(exec.signal); } catch (failure) { error = failure.message; }
       }
       if (!readiness.toolsReady) error = `Missing tools: ${readiness.missing.join(', ')}`;
-      const record = { version: 1, kind: 'begin', sessionId: agent.id, runId: randomUUID(), taskKind: args.task_kind ? choice(args.task_kind, 'task_kind', ['overview', 'review', 'implementation', 'audit', 'other']) : /audit|审计/i.test(args.task) ? 'audit' : /overview|概览|目前.*情况|当前.*状态/i.test(args.task) ? 'overview' : 'other', mode: error ? 'diagnostic' : mode, backend: ctx.get?.('agentTeams') ? 'team' : 'subagent', task: text(args.task, 'task', 1000), route, error, consent: mode === 'direct' ? own.consent : null };
+      const record = { version: 1, kind: 'begin', sessionId: agent.id, runId: randomUUID(), taskKind: args.task_kind ? choice(args.task_kind, 'task_kind', ['overview', 'review', 'implementation', 'audit', 'other']) : /audit|审计/i.test(args.task) ? 'audit' : /overview|概览|目前.*情况|当前.*状态/i.test(args.task) ? 'overview' : 'other', mode: error ? 'diagnostic' : mode, backend: selectedBackend, backendSelection: args.backend ?? config.workerBackend ?? 'auto', task: text(args.task, 'task', 1000), route, error, consent: mode === 'direct' ? own.consent : null };
       commit(record);
       return { record, ...readiness, workerRouteReady: !!route, workerStarted: false, choices: error ? ['修复导师能力后继续', DIRECT_LABEL, '只做能力诊断'] : [] };
     }
-    tool('mentor_begin', 'Check actual capabilities before execution. Non-trivial work uses collaborative; simple covers brief questions or tiny tasks. Direct requires an actual user consent answer; diagnostic does not authorize task execution.', object({ mode: enumeration(['collaborative', 'simple', 'direct', 'diagnostic'], 'Execution mode for this task.'), task: str('Task boundary and stopping condition, at most 1000 characters.'), task_kind: enumeration(['overview', 'review', 'implementation', 'audit', 'other'], 'Task level. overview has a one-worker budget; stop once version, scope, blockers and evidence sources are clear.') }, ['mode', 'task']), begin);
+    tool('mentor_begin', 'Check actual capabilities before execution. Non-trivial work uses collaborative; simple covers brief questions or tiny tasks. Direct requires an actual user consent answer; diagnostic does not authorize task execution.', object({ mode: enumeration(['collaborative', 'simple', 'direct', 'diagnostic'], 'Execution mode for this task.'), task: str('Task boundary and stopping condition, at most 1000 characters.'), backend: enumeration(['auto', 'subagent', 'team'], 'Optional backend for a NEW run. Default host workerBackend; auto uses enabled native Teams, otherwise continuable subagents. Explicit team requires ready integration. Existing runs and workers keep their backend.'), task_kind: enumeration(['overview', 'review', 'implementation', 'audit', 'other'], 'Task level. overview has a one-worker budget; stop once version, scope, blockers and evidence sources are clear.') }, ['mode', 'task']), begin);
     const nativeCheck = (name, args, exec) => scoped.tools.execute({ callId: randomUUID(), rootCallId: exec.rootCallId, parent: exec.token, name, arguments: args, agent, signal: exec.signal });
     async function fingerprint(paths, exec) {
       const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";

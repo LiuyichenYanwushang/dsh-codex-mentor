@@ -1,21 +1,31 @@
-# Codex Mentor · 导师模式
+# Mentor · 导师协作
+
+保留历史包名 `dsh-codex-mentor` 和模式 ID `codex-mentor`，以兼容旧任务；从 0.8.0 起不再要求 Codex 担任 Leader。
 
 DSH 0.2.0-rc.2 的独立模式 bundle。非 OpenAI/DeepSeek 官方产品；提示词为适配 DSH 工具的 Codex 风格导师协议，不宣称是官方 Codex 原始提示词或等效模型。
 
 ## 前置依赖
 
 - **DeepSeek Harness `0.2.0-rc.2`**：当前精确兼容版本，其他版本尚未验证。
-- **[dsh-codex-connect](https://github.com/franksong2702/dsh-codex-connect)**：需要独立安装、启用并完成 ChatGPT OAuth，提供 `openai-codex` GPT 路由；本插件不包含也不替代登录组件。已验证 `0.2.0-alpha.1`。
+- **[dsh-codex-connect](https://github.com/franksong2702/dsh-codex-connect)**：**可选**，仅当你选择 Codex/GPT 路由时需要独立安装、启用并完成 ChatGPT OAuth，提供 `openai-codex` GPT 路由；本插件不包含也不替代登录组件。已验证 `0.2.0-alpha.1`。
 - **DeepSeek Flash 路由**：在 DSH 的 Models 设置中配置 DeepSeek 账户或官方 API，确认 `deepseek-flash` 可用。
 - 开发测试需要 Node.js 22.23.2 或更新的兼容版本（原生 `registerHooks`）。
 
-只需安装 **Codex Connect + Codex Mentor** 两个独立插件，不再需要 `dsh-codex-mentor-live-fix` 或 `dsh-codex-mentor-mode-fix`。
+使用其他已配置模型作为 Leader 时只需本导师插件和 Flash 路由；Codex Connect 不是必需依赖，不再需要 `dsh-codex-mentor-live-fix` 或 `dsh-codex-mentor-mode-fix`。
 
 ## 使用
 
-安装打包后的 tarball（`npm pack --ignore-scripts --json`），以安装器的 applied/restart-required 状态为准；需要时重启现有 DSH 服务。新建会话，模式选择 **Codex Mentor · 导师模式**，主模型选择你已授权的 `openai-codex` GPT。不改变 Standard 或全局默认模型；已有导师会话会补装 Host 工具，但其 preset 版本不被擅自替换，完整能力以新会话验收。刷新页面可重新获取模式列表。
+安装打包后的 tarball（`npm pack --ignore-scripts --json`），以安装器的 applied/restart-required 状态为准；需要时重启现有 DSH 服务。新建会话，模式选择 **Mentor · 导师协作**，保留当前会话模型担任 Leader，不自动切到 Codex。不改变 Standard 或全局默认模型；已有导师会话会补装 Host 工具，但其 preset 版本不被擅自替换，完整能力以新会话验收。刷新页面可重新获取模式列表。
 
 Flash 默认自动选择已配置且目录中包含 `deepseek-flash`（显示名 DeepSeek-V41-Flash）的 `deepseek-account`，其次 `deepseek-official`。选择发生在派工前，实际路由写入子会话描述和任务记录；推理失败不会自动换成 GPT，也不会切换账户。其他 provider 可以通过 `codex-mentor-host` 配置显式指定。缺凭据时在 Settings → Models 配置；目录可用不是推理成功的证明。
+
+## 0.8.0：当前模型 Leader，可选协作后端
+
+- 在原来的会话模型选择器里选择或中途更换 Leader；新选择作用于后续模型请求，不改写已经进行中的生成。模型需支持当前工具调用；本插件不注册、不替换你的模型路由，也不改变其他模式或全局默认模型。
+- 在插件的 `codex-mentor-host` 配置中选择 `workerBackend: auto | subagent | team`。`subagent` 使用可继续的 Flash 子代理，即使原生 Teams 插件已开启也可选择；`team` 使用原生成员/任务板，要求 Teams 已启用且模型选项接口可用；`auto` 保持兼容，开启原生 Teams 时用 team，否则用 subagent。
+- 新一轮任务也可明确指定 `mentor_begin({mode:"collaborative",task:"…",backend:"subagent"})` 或 `backend:"team"`。后端一经记录不在同一轮暗迁移；要换后端先结束旧轮。换 Leader 无需取消任务，不改变 task/child/report ID、Flash 工作模型、写权限或独立验收状态。
+- `requireGptMentor` 默认 `false`。只有你明确将其设为 `true`，才恢复旧版 Codex/GPT-only 限制。历史包名/模式 ID 与 Inspect Provider `CodexMentor` 保持不变；Codex Connect 成为可选依赖。
+- 本轮 69/69 确定性测试通过：真实 SDK 循环中模拟 Leader 从 DeepSeek 切换到 Codex，保持同一轮/任务/子会话/报告/标准，执行者仍为原来的 Flash，独立检查及接受、JSONL 回放和冷恢复均保留。这是脚本适配器验证，不是外部 GPT/Flash 推理，也未自动恢复旧项目任务。
 
 ## 0.7.0：固定验收协议与有界概览
 
@@ -29,7 +39,7 @@ Flash 默认自动选择已配置且目录中包含 `deepseek-flash`（显示名
 
 ## 0.6：原生智能体团队
 
-导师模式的原生 Teams 路径由 Codex/GPT 担任唯一 Lead，`mentor_delegate` 创建固定 Flash 成员、原生名单和关联任务；原生消息负责耐久投递，导师协议负责求助、指导和独立验收。用户启用 Codex Mentor、此前已请求并启用 Teams 集成、且 `mentor_begin` 确认 ready team backend，三者共同授权仅经 `mentor_delegate` 创建必要 Flash 成员，无需再次询问；其他模式/原始原生成员创建仍须用户明确请求 Teams。仅选模式或调用 begin 不证明授权或能力，unsafe/hidden 路由及缺接口仍受 guard 阻止，不静默 fallback。人数及每个成员的 `reasoning_effort` 按任务决定，不固定两人或三人；可选程度由 `mentor_status` 返回真实能力，也可明确选择 `default`。关闭 Teams 时保留 continuable Flash 子代理路径；不更改其他模式或全局模型。
+导师模式的原生 Teams 路径由当前会话模型担任唯一 Lead（0.8.0 前为 Codex/GPT），`mentor_delegate` 创建固定 Flash 成员、原生名单和关联任务；原生消息负责耐久投递，导师协议负责求助、指导和独立验收。用户启用 Codex Mentor、此前已请求并启用 Teams 集成、且 `mentor_begin` 确认 ready team backend，三者共同授权仅经 `mentor_delegate` 创建必要 Flash 成员，无需再次询问；其他模式/原始原生成员创建仍须用户明确请求 Teams。仅选模式或调用 begin 不证明授权或能力，unsafe/hidden 路由及缺接口仍受 guard 阻止，不静默 fallback。人数及每个成员的 `reasoning_effort` 按任务决定，不固定两人或三人；可选程度由 `mentor_status` 返回真实能力，也可明确选择 `default`。关闭 Teams 时保留 continuable Flash 子代理路径；不更改其他模式或全局模型。
 
 **原生接口依赖：** 原版 DSH `0.2.0-rc.2` 的 Teams 接口不能指定成员模型，会继承 Lead。本仓库提供可选的[原生接口补丁说明](<runtime-patches/README.md>)，不是另一个修复插件。明确同意修改运行时时，在停止 DSH 后执行：
 
