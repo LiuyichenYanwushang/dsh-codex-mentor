@@ -1,6 +1,6 @@
 - insert:
     - id: codex-mentor-host
-      name: './host-0.8.0.js'
+      name: './host-0.9.0.js'
       config:
         workerProvider: auto
         workerModel: deepseek-flash
@@ -13,7 +13,7 @@
       config:
         id: codex-mentor
         name: Mentor · 导师协作
-        description: 当前会话模型担任 Leader，可中途换模型；选择 Flash 子代理或原生团队，保留独立验收和可恢复任务记忆。
+        description: 当前会话模型担任 Leader，可中途换模型；默认 Flash，Leader 可逐任务选模型；支持子代理/原生团队，保留独立验收和可恢复任务记忆。
         order: 5
         plugins:
           - id: mentor-capability-guard

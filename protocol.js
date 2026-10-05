@@ -60,6 +60,7 @@ export function taskSummary(task, activity = 'not-live') {
   try { criteria = task.criteria ?? reportCriteria(task.report?.evidenceGate?.criteria).map(({ id }) => ({ id })); } catch { criteria = task.criteria ?? []; }
   return {
     taskId: task.taskId ?? null, runId: task.runId ?? null, childId: task.childId ?? null, goal: task.goal?.slice(0, 200) ?? '', status: task.status,
+    workerModel: task.route ? { provider: task.route.provider ?? null, model: task.route.model ?? null, maxTokens: task.route.maxTokens ?? null, selection: task.modelSelection ?? 'recorded' } : null,
     execution: { activity, stoppedWithoutReport: task.status === 'stopped' && !submitted },
     report: { state: submitted ? 'submitted' : task.report ? task.report.status : 'none', id: submission?.id ?? task.report?.id ?? null, latestUpdateStatus: task.report?.status ?? null, latestUpdateId: task.report?.id ?? null },
     acceptance: { state: task.status === 'accepted' ? 'accepted' : task.status === 'acceptance_blocked' ? 'acceptance_blocked' : task.status === 'closed-unaccepted' ? 'closed-unaccepted' : task.status === 'cancelled' ? 'cancelled' : 'not-accepted', diagnostic: task.acceptanceBlock && task.report?.id && task.acceptanceBlock.reportId === task.report.id ? task.acceptanceBlock.diagnostic : null },

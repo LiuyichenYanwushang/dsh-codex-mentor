@@ -4,9 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { scopeOf, scopeParentOf } from '@deepseek-ai/dsh-scope';
-import { KEY, PRESET, TERMINAL, initial, fold, view, contextText, encode, text, choice, list, argsObject } from './ledger.js?mentor=0.8.0';
-import { MENTOR, WORKER } from './prompts.js?mentor=0.8.0';
-import { toolReadiness, cooperation, effectiveCapabilities, BYPASS, DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './experience.js?mentor=0.8.0';
+import { KEY, PRESET, TERMINAL, initial, fold, view, contextText, encode, text, choice, list, argsObject } from './ledger.js?mentor=0.9.0';
+import { MENTOR, WORKER } from './prompts.js?mentor=0.9.0';
+import { toolReadiness, cooperation, effectiveCapabilities, BYPASS, DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './experience.js?mentor=0.9.0';
 
 export const name = 'codex-mentor';
 export const inject = ['tools', 'systemPrompt', 'sessionProjections', 'subagents', 'agents', 'agentPresets', 'llm'];
@@ -22,7 +22,7 @@ const str = description => ({ type: 'string', description });
 const enumeration = (values, description) => ({ type: 'string', enum: values, description });
 const strings = description => ({ type: 'array', items: { type: 'string' }, description });
 const object = (properties, required = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false });
-import { reject, contractCriteria, reportCriteria, taskSummary, permissions, evidenceReuse } from './protocol.js?mentor=0.8.0';
+import { reject, contractCriteria, reportCriteria, taskSummary, permissions, evidenceReuse } from './protocol.js?mentor=0.9.0';
 const contractSchema = { type: 'array', items: object({ id: str('Immutable short ASCII ID, e.g. A.'), description: str('Exact bounded acceptance requirement.') }), description: '1–16 immutable criteria; omitted means one AC1 for acceptance. IDs, not titles, bind reports and assessments.' };
 const resultCriteriaSchema = { type: 'array', items: { oneOf: [object({ id: str('Exact assignment criterion ID.'), status: enumeration(['PASS', 'FAIL', 'UNVERIFIED'], 'Worker claim only, never mentor acceptance.'), evidence: str('Observed result or attributed source.'), scope: str('Coverage, source date/version and what was not verified.') }), str('Legacy tasks without fixed criteria only.') ] }, description: 'For ready-review: one structured result per immutable assignment ID. Put correction history in deviations, not extra criteria.' };
 
@@ -37,22 +37,28 @@ export function apply(ctx, config) {
     if (!result) throw new Error('Codex Mentor task memory is unavailable');
     return result;
   }
-  async function routes(signal) {
+  async function routes(signal, selection = {}) {
+    const explicit = selection.worker_provider !== undefined || selection.worker_model !== undefined;
+    if (explicit && (selection.worker_provider === undefined || selection.worker_model === undefined)) reject('WORKER_ROUTE_PAIR_REQUIRED', 'A per-task model override needs both provider and model', 'Use mentor_status detail=models to discover exact IDs, then set worker_provider and worker_model together');
+    const model = explicit ? text(selection.worker_model, 'worker_model', 160) : config.workerModel;
+    const selectedProvider = explicit ? text(selection.worker_provider, 'worker_provider', 160) : config.workerProvider;
     const providers = ctx.llm.listProviders();
-    const candidates = config.workerProvider === 'auto' ? ['deepseek-account', 'deepseek-official'] : [config.workerProvider];
+    const candidates = !explicit && selectedProvider === 'auto' ? ['deepseek-account', 'deepseek-official'] : [selectedProvider];
     const diagnostics = [];
     for (const provider of candidates) {
       if (!providers.some(item => item.id === provider)) { diagnostics.push(`${provider}: not registered`); continue; }
       try {
         const models = await ctx.llm.listModels(provider);
-        if (!models.some(item => item.id === config.workerModel)) { diagnostics.push(`${provider}: ${config.workerModel} not advertised; configure credentials/model route in Settings → Models`); continue; }
-        return await ctx.llm.resolveCallConfig({ provider, model: config.workerModel, maxTokens: config.workerMaxTokens }, signal);
+        if (!models.some(item => item.id === model)) { diagnostics.push(`${provider}: ${model} not advertised; configure the route in Settings → Models`); continue; }
+        // Flash's requested budget is not another model's output capability/default.
+        return await ctx.llm.resolveCallConfig({ provider, model, ...(model === 'deepseek-flash' ? { maxTokens: config.workerMaxTokens } : {}) }, signal);
       } catch (error) {
         if (signal?.aborted) throw error;
         diagnostics.push(`${provider}: catalog or configuration unavailable (${error.code ?? error.name})`);
       }
     }
-    throw new Error('Flash worker unavailable. ' + diagnostics.join('; ') + '. No GPT fallback was used.');
+    if (explicit) reject('WORKER_ROUTE_UNAVAILABLE', diagnostics.join('; '), 'Select a registered provider and advertised model, or fix its configuration; no alternate model/account was started', { provider: selectedProvider, model });
+    throw new Error('Default worker unavailable. ' + diagnostics.join('; ') + '. No GPT fallback was used.');
   }
   function chooseBackend(selection = config.workerBackend ?? 'auto') {
     const selected = choice(selection, 'backend', ['auto', 'subagent', 'team']);
@@ -65,7 +71,7 @@ export function apply(ctx, config) {
     const providers = ctx.llm.listProviders();
     const mentorModels = config.requireGptMentor && providers.some(item => item.id === 'openai-codex') ? await ctx.llm.listModels('openai-codex') : [];
     const presets = await ctx.agentPresets.list();
-    return { version: '0.8.0', backend: chooseBackend(), backendSelection: config.workerBackend ?? 'auto', nativeTeams: { enabled: !!ctx.get?.('agentTeams'), modelOptionsSupported: ctx.get?.('agentTeams')?.supportsAgentOptions === true }, flashCapabilities: { contextWindow: 1000000, maxOutputTokens: 384000, configuredOutputBudget: config.workerMaxTokens }, preset: presets.find(item => item.id === PRESET) ?? null, worker, mentor: { modelPolicy: config.requireGptMentor ? 'codex-gpt-only' : 'current-session', provider: config.requireGptMentor ? 'openai-codex' : null, models: mentorModels.map(item => item.id), selectableProviders: providers.map(item => item.id), switchable: true, switchAppliesAt: 'next-request', inferenceTested: false }, liveSessions: (ctx.agents.list?.() ?? []).filter(agent => ctx.agentPresets.composedPreset(agent.ctx) === PRESET).map(agent => ({ sessionId: agent.id, role: agent.session.header.origin === 'subagent' ? 'worker' : 'mentor', ...toolReadiness(agent, ctx.tools), workerRouteReady: worker.ready, initializationError: failures.get(agent.id) ?? null, cooperation: cooperation(state(agent)) })), memory: 'Session-log projection; compression cannot erase recorded task facts. Session-scoped, not a cross-project vector database.' };
+    return { version: '0.9.0', backend: chooseBackend(), backendSelection: config.workerBackend ?? 'auto', nativeTeams: { enabled: !!ctx.get?.('agentTeams'), modelOptionsSupported: ctx.get?.('agentTeams')?.supportsAgentOptions === true }, flashCapabilities: { contextWindow: 1000000, maxOutputTokens: 384000, configuredOutputBudget: config.workerMaxTokens }, preset: presets.find(item => item.id === PRESET) ?? null, worker, workerSelection: { defaultModel: config.workerModel, perTask: 'Leader chooses worker_provider+worker_model for NEW tasks only; otherwise default', discovery: { tool: 'mentor_status', arguments: { detail: 'models' } }, existingTasks: 'pinned; no self-switch or midtask model changes' }, mentor: { modelPolicy: config.requireGptMentor ? 'codex-gpt-only' : 'current-session', provider: config.requireGptMentor ? 'openai-codex' : null, models: mentorModels.map(item => item.id), selectableProviders: providers.map(item => item.id), switchable: true, switchAppliesAt: 'next-request', inferenceTested: false }, liveSessions: (ctx.agents.list?.() ?? []).filter(agent => ctx.agentPresets.composedPreset(agent.ctx) === PRESET).map(agent => ({ sessionId: agent.id, role: agent.session.header.origin === 'subagent' ? 'worker' : 'mentor', ...toolReadiness(agent, ctx.tools), workerRouteReady: worker.ready, workerRouteScope: 'configured-default-only; use mentor_status task_id for assigned route', initializationError: failures.get(agent.id) ?? null, cooperation: cooperation(state(agent)) })), memory: 'Session-log projection; compression cannot erase recorded task facts. Session-scoped, not a cross-project vector database.' };
   }
   ctx.inject(['cordisInspect'], inner => {
     inner.effect(() => inner.cordisInspect.register({
@@ -131,8 +137,9 @@ export function apply(ctx, config) {
       owned(() => scoped.on('agent/request', async (_payload, next) => {
         const selected = await next();
         const route = state(agent).tasks[0]?.route;
-        if (route && (selected.provider !== route.provider || selected.model !== route.model)) throw new Error('This worker is pinned to its recorded Flash route; changing its model is not allowed.');
-        return selected;
+        if (route && (selected.provider !== route.provider || selected.model !== route.model)) throw new Error('This worker is pinned to its recorded assignment route; changing its model is not allowed.');
+        // Continuable descriptors omit maxTokens; restore the journal's budget on every call/recovery.
+        return route?.maxTokens === undefined ? selected : { ...selected, maxTokens: route.maxTokens };
       }));
     }
     if (!child) owned(() => scoped.on('agent/pre-step', async (payload, next) => {
@@ -165,7 +172,7 @@ export function apply(ctx, config) {
     const inheritedScope = scopeParentOf(scopeOf(agent.ctx));
     const deny = bypass.filter(tool => ctx.tools.get(tool, inheritedScope));
     if (deny.length) owned(() => scoped.tools.restrict({ deny }));
-    owned(() => scoped.tools.guard(execution => bypass.includes(execution.name) || (teamControls.has(execution.name) && backend() !== 'team') ? 'Use mentor_delegate for fixed Flash members; alternate delegation is disabled in this mode' : undefined));
+    owned(() => scoped.tools.guard(execution => bypass.includes(execution.name) || (teamControls.has(execution.name) && backend() !== 'team') ? 'Use mentor_delegate for assigned-model members; alternate delegation is disabled in this mode' : undefined));
     if (!child) owned(() => scoped.tools.guard(execution => {
       if (execution.name.startsWith('mentor_') || ['ask_user_question', 'skill', 'todo_write'].includes(execution.name)) return;
       const current = state(agent), readiness = toolReadiness(agent, ctx.tools);
@@ -243,9 +250,29 @@ export function apply(ctx, config) {
       commit(record);
       return messageId;
     }
-    tool('mentor_status', 'Read compact task facts, latest report ID, acceptance blocker and next action. Expand only the assignment, report, evidence or history you need.', object({ task_id: str('Optional task to select. Selection alone does not expand its history.'), detail: enumeration(['summary', 'assignment', 'report', 'evidence', 'history', 'full'], 'Default summary. Use assignment after recovery; evidence with check_id retrieves one saved check.'), check_id: str('For detail=evidence: exact verification ID; omit for a short verification directory.') }, []), async args => {
+    tool('mentor_status', 'Read compact task facts, latest report ID, acceptance blocker and next action. Expand only the assignment, report, evidence or history you need.', object({ task_id: str('Optional task to select. Selection alone does not expand its history.'), detail: enumeration(['summary', 'assignment', 'report', 'evidence', 'history', 'full', 'models'], 'Default summary. Use assignment after recovery; evidence with check_id retrieves one check; models lists providers, then exact model IDs/capabilities.'), check_id: str('For detail=evidence: exact verification ID; omit for a short verification directory.'), provider: str('For detail=models: registered provider ID; omit for provider directory.'), model_id: str('For detail=models with provider: exact advertised model ID to inspect context, output default and reasoning efforts.'), offset: { type: 'integer', minimum: 0, description: 'For detail=models with provider: model-list page offset, default 0; pages contain at most 50 IDs.' } }, []), async (args, exec) => {
       const own = state(agent), selected = args.task_id ? [task(args.task_id)] : own.tasks;
-      const detail = choice(args.detail ?? 'summary', 'detail', ['summary', 'assignment', 'report', 'evidence', 'history', 'full']);
+      const detail = choice(args.detail ?? 'summary', 'detail', ['summary', 'assignment', 'report', 'evidence', 'history', 'full', 'models']);
+      if (detail === 'models') {
+        const providers = ctx.llm.listProviders();
+        if (args.provider === undefined) {
+          if (args.model_id !== undefined) reject('WORKER_PROVIDER_REQUIRED', 'Model capability inspection needs a provider', 'Select an exact provider ID from the directory');
+          return { defaultWorker: { provider: config.workerProvider, model: config.workerModel }, providers: providers.map(item => ({ id: item.id, name: item.name ?? item.id })), next: { detail: 'models', provider: '<provider ID>' }, inferenceTested: false };
+        }
+        const provider = text(args.provider, 'provider', 160);
+        if (!providers.some(item => item.id === provider)) reject('WORKER_PROVIDER_UNAVAILABLE', 'Provider is not registered', 'Use an ID from the model provider directory', { provider });
+        let models;
+        try { models = await ctx.llm.listModels(provider); } catch (error) { if (exec.signal.aborted) throw error; reject('WORKER_CATALOG_UNAVAILABLE', `Model catalog unavailable (${error.code ?? error.name})`, 'Check this provider configuration; do not guess model IDs', { provider }); }
+        if (args.model_id !== undefined) {
+          const model = text(args.model_id, 'model_id', 160);
+          if (!models.some(item => item.id === model)) reject('WORKER_MODEL_UNAVAILABLE', 'Model is not advertised by this provider', 'Use an exact ID from the provider model directory', { provider, model });
+          const info = await ctx.llm.resolveModelInfo(provider, model, exec.signal);
+          return { provider, model, context: info.context ?? null, nativeDefaultMaxTokens: info.defaultMaxTokens ?? null, reasoning: info.reasoning ?? null, inferenceTested: false };
+        }
+        const offset = args.offset ?? 0;
+        if (!Number.isSafeInteger(offset) || offset < 0) reject('MODEL_OFFSET_INVALID', 'offset must be a nonnegative safe integer', 'Use the nextOffset returned by the model directory');
+        return { provider, models: models.slice(offset, offset + 50).map(item => ({ id: item.id, name: item.name ?? item.id })), total: models.length, offset, nextOffset: offset + 50 < models.length ? offset + 50 : null, capabilities: { detail: 'models', provider, model_id: '<model ID>' }, inferenceTested: false };
+      }
       const current = args.task_id ? selected[0] : null;
       const pageSize = 8, page = args.task_id ? selected : selected.slice(-pageSize);
       const cwd = resolve(agent.session.header.cwd ?? process.cwd());
@@ -260,12 +287,12 @@ export function apply(ctx, config) {
       if (detail === 'full') { const { activeRun, activeTasks, ...result } = view(own); return { ...result, tasks: selected }; }
       if (detail === 'history') return { lastCompletedRun: own.lastCompletedRun, lastRunCooperation: cooperation(own, own.lastCompletedRun), recentTasks: own.tasks.slice(-8).map(item => taskSummary(item, ctx.agents.get(item.childId)?.status ?? 'not-live')) };
       let workerRoute;
-      try { const route = await routes(); const info = await ctx.llm.resolveModelInfo(route.provider, route.model); workerRoute = { ready: true, route, reasoning: info.reasoning ?? null }; } catch (error) { workerRoute = { ready: false, error: error.message }; }
+      try { const route = current?.route ?? (child ? own.tasks[0]?.route : null) ?? await routes(); const info = await ctx.llm.resolveModelInfo(route.provider, route.model); workerRoute = { ready: true, route, reasoning: info.reasoning ?? null }; } catch (error) { workerRoute = { ready: false, error: error.message }; }
       const service = ctx.get?.('agentTeams');
       const team = backend() === 'team' ? { ready: service?.supportsAgentOptions === true, role: service?.tryMembership(agent)?.role ?? null, meaning: 'Native completed=submitted, not independently accepted.' } : null;
       const recovery = child ? [] : selected.filter(item => item.status === 'stopped').map(item => ({ taskId: item.taskId, available: !recovering.has(item.taskId) && ctx.agents.get(item.childId)?.status !== 'running', tool: 'mentor_resume', arguments: { task_id: item.taskId }, message: '继续生成' }));
       const run = own.run ? { runId: own.run.runId, mode: own.run.mode, taskKind: own.run.taskKind, task: own.run.task, error: own.run.error } : null;
-      return { sessionId: own.sessionId, role: child ? 'worker' : 'mentor', run, backend: backend(), team, capabilities: { ...toolReadiness(agent, ctx.tools), worker: workerRoute }, tasks: page.map(item => taskSummary(item, ctx.agents.get(item.childId)?.status ?? 'not-live')), taskDirectory: !args.task_id && selected.length > pageSize ? selected.map(item => ({ taskId: item.taskId, status: item.status })) : [], omittedTaskDetails: Math.max(0, selected.length - page.length), cooperation: { ...cooperation(own), outstanding: cooperation(own).outstanding.map(item => item.taskId) }, recovery, checkpoint: { text: own.checkpoint.slice(0, 1000), taskFactsMayHaveChanged: own.tasks.some(item => item.seq > (own.checkpointSeq ?? -1)), meaning: 'Decisions and hypotheses only; task facts above are authoritative.' }, expansion: { detail: ['assignment', 'report', 'evidence', 'history', 'full'], task_id: current?.taskId ?? null } };
+      return { sessionId: own.sessionId, role: child ? 'worker' : 'mentor', run, backend: backend(), team, capabilities: { ...toolReadiness(agent, ctx.tools), worker: workerRoute }, tasks: page.map(item => taskSummary(item, ctx.agents.get(item.childId)?.status ?? 'not-live')), taskDirectory: !args.task_id && selected.length > pageSize ? selected.map(item => ({ taskId: item.taskId, status: item.status })) : [], omittedTaskDetails: Math.max(0, selected.length - page.length), cooperation: { ...cooperation(own), outstanding: cooperation(own).outstanding.map(item => item.taskId) }, recovery, checkpoint: { text: own.checkpoint.slice(0, 1000), taskFactsMayHaveChanged: own.tasks.some(item => item.seq > (own.checkpointSeq ?? -1)), meaning: 'Decisions and hypotheses only; task facts above are authoritative.' }, expansion: { detail: ['assignment', 'report', 'evidence', 'history', 'full', 'models'], task_id: current?.taskId ?? null } };
     });
     if (!child) tool('mentor_wait', 'Yield this turn while selected Mentor workers are pending. Their formal reports or stop notices resume this session; no Agent Teams polling is needed.', object({ task_ids: strings('Tasks to await; omit for all outstanding tasks.') }, []), async (args, exec) => {
       const ids = list(args.task_ids ?? [], 'task_ids');
@@ -329,14 +356,15 @@ export function apply(ctx, config) {
       }
       if (own.tasks.some(item => !TERMINAL.includes(item.status))) throw new Error('Recover existing tasks with mentor_status; do not silently switch their execution mode.');
       if (mode === 'direct' && !own.consent) throw new Error(`Direct execution requires a real user answer. Use ask_user_question with question id "${DIRECT_QUESTION_ID}" and options "修复导师能力后继续", "${DIRECT_LABEL}", "只做能力诊断"; no answer or a skipped answer is not permission.`);
-      let route = null, error = '';
+      let route = null, error = '', defaultWorkerError = '';
       if (mode === 'collaborative' && readiness.toolsReady) {
-        try { if (selectedBackend === 'team') teams(); route = await routes(exec.signal); } catch (failure) { error = failure.message; }
+        try { if (selectedBackend === 'team') teams(); } catch (failure) { error = failure.message; }
+        if (!error) try { route = await routes(exec.signal); } catch (failure) { if (exec.signal.aborted) throw failure; defaultWorkerError = failure.message; }
       }
       if (!readiness.toolsReady) error = `Missing tools: ${readiness.missing.join(', ')}`;
-      const record = { version: 1, kind: 'begin', sessionId: agent.id, runId: randomUUID(), taskKind: args.task_kind ? choice(args.task_kind, 'task_kind', ['overview', 'review', 'implementation', 'audit', 'other']) : /audit|审计/i.test(args.task) ? 'audit' : /overview|概览|目前.*情况|当前.*状态/i.test(args.task) ? 'overview' : 'other', mode: error ? 'diagnostic' : mode, backend: selectedBackend, backendSelection: args.backend ?? config.workerBackend ?? 'auto', task: text(args.task, 'task', 1000), route, error, consent: mode === 'direct' ? own.consent : null };
+      const record = { version: 1, kind: 'begin', sessionId: agent.id, runId: randomUUID(), taskKind: args.task_kind ? choice(args.task_kind, 'task_kind', ['overview', 'review', 'implementation', 'audit', 'other']) : /audit|审计/i.test(args.task) ? 'audit' : /overview|概览|目前.*情况|当前.*状态/i.test(args.task) ? 'overview' : 'other', mode: error ? 'diagnostic' : mode, backend: selectedBackend, backendSelection: args.backend ?? config.workerBackend ?? 'auto', task: text(args.task, 'task', 1000), route, error, defaultWorkerError, consent: mode === 'direct' ? own.consent : null };
       commit(record);
-      return { record, ...readiness, workerRouteReady: !!route, workerStarted: false, choices: error ? ['修复导师能力后继续', DIRECT_LABEL, '只做能力诊断'] : [] };
+      return { record, ...readiness, workerRouteReady: !!route, defaultWorkerError, workerStarted: false, choices: error ? ['修复导师能力后继续', DIRECT_LABEL, '只做能力诊断'] : [] };
     }
     tool('mentor_begin', 'Check actual capabilities before execution. Non-trivial work uses collaborative; simple covers brief questions or tiny tasks. Direct requires an actual user consent answer; diagnostic does not authorize task execution.', object({ mode: enumeration(['collaborative', 'simple', 'direct', 'diagnostic'], 'Execution mode for this task.'), task: str('Task boundary and stopping condition, at most 1000 characters.'), backend: enumeration(['auto', 'subagent', 'team'], 'Optional backend for a NEW run. Default host workerBackend; auto uses enabled native Teams, otherwise continuable subagents. Explicit team requires ready integration. Existing runs and workers keep their backend.'), task_kind: enumeration(['overview', 'review', 'implementation', 'audit', 'other'], 'Task level. overview has a one-worker budget; stop once version, scope, blockers and evidence sources are clear.') }, ['mode', 'task']), begin);
     const nativeCheck = (name, args, exec) => scoped.tools.execute({ callId: randomUUID(), rootCallId: exec.rootCallId, parent: exec.token, name, arguments: args, agent, signal: exec.signal });
@@ -370,8 +398,10 @@ export function apply(ctx, config) {
       const record = { version: 1, kind: 'verify', taskId: assignment.taskId, id: randomUUID(), label, evidenceKind: args.kind ? choice(args.kind, 'kind', ['test-execution', 'historical-log', 'static-read', 'version-check', 'other']) : 'other', tool: name, arguments: args.arguments, output: JSON.stringify(result.value ?? result.error ?? null), isError, execution_status: executionStatus, executionSucceeded: succeeded, jobId: result.value?.jobId ?? null, criterionSatisfied: null, inputs: stable ? after : null, inputScope: paths, executionScope, directInput, readyReportId: ['ready-review', 'acceptance_blocked'].includes(assignment.status) ? assignment.report?.id ?? '' : '', incrementalReason };
       return { record, checkId: record.id, isError, execution_status: executionStatus, executionSucceeded: succeeded, criterionSatisfied: null, reusableInputs: stable, scopeLimit: 'Only declared file inputs were fingerprinted. Use mentor_status detail=evidence with check_id for the complete native result; execution success is not criterion satisfaction.' };
     });
-    tool('mentor_delegate', 'Start a fixed-model Flash worker with a self-contained assignment and return its durable id. Runs in the background; reports can ask for tutor guidance.', object({
-      name: str('Optional permanent lower-kebab-case native teammate name; generated when omitted.'), reasoning_effort: str('Required for native Teams: an advertised Flash effort id from mentor_status, or "default" to deliberately choose its model default. Optional for subagents.'),
+    tool('mentor_delegate', 'Start a worker with a self-contained assignment and return its durable id. Default Flash; the Leader may choose a model per new task. Runs in the background; reports can ask for tutor guidance.', object({
+      name: str('Optional permanent lower-kebab-case native teammate name; generated when omitted.'), reasoning_effort: str('Required for native Teams: an advertised effort of the SELECTED worker model from mentor_status detail=models, or "default". Optional for subagents.'),
+      worker_provider: str('Optional exact registered provider ID; pair with worker_model. Omit both for configured default Flash. Discover with mentor_status detail=models. No account/provider fallback.'),
+      worker_model: str('Optional exact advertised model ID; pair with worker_provider. Leader may choose without repeated user confirmation unless user constraints prohibit it. Immutable for this task; other models use native output defaults, not Flash384k.'),
       goal: str('Self-contained task and relevant context, at most 3000 characters.'), write_scope: strings('Workspace-relative write scope. [] disables ALL mutation and shell tools, including Git, hashes and tests; assign those checks to the mentor. No globs, absolute paths or parent traversal.'),
       required_capabilities: { type: 'array', items: enumeration(['fileRead', 'fileWrite', 'shell', 'tests', 'formalReport'], 'Required assignment capability.'), description: 'Optional execution requirements; unsupported capabilities are rejected before worker creation.' },
       acceptance: str('Overall bounded acceptance requirement, at most 2000 characters. Not parsed for IDs.'), criteria: contractSchema, constraints: str('Architectural boundaries and restrictions, at most 2000 characters.'),
@@ -397,11 +427,11 @@ export function apply(ctx, config) {
       const selectedBackend = own.run.backend ?? 'subagent';
       if (selectedBackend === 'team') teams();
       if (selectedBackend === 'team' && !args.reasoning_effort) throw new Error('The mentor must choose reasoning_effort for each teammate; use an advertised effort or "default".');
-      let route = await routes(exec.signal);
+      let route = await routes(exec.signal, args);
       if (args.reasoning_effort && args.reasoning_effort !== 'default') route = await ctx.llm.resolveCallConfig({ ...route, reasoningEffort: text(args.reasoning_effort, 'reasoning_effort', 80) }, exec.signal);
-      const record = { version: 1, kind: 'assignment', taskId: randomUUID(), runId: own.run.runId, parentRunId: own.run.runId, parentId: agent.id, backend: selectedBackend, reasoningDecision: args.reasoning_effort ?? 'default', effectiveCapabilities: capabilities, permissions: permissions(writeScope), taskKind: own.run.taskKind, criteria: contractCriteria(args.criteria, text(args.acceptance, 'acceptance', 2000)), goal: text(args.goal, 'goal'), writeScope, acceptance: text(args.acceptance, 'acceptance', 2000), constraints: args.constraints ? text(args.constraints, 'constraints', 2000) : '', contract: { invariants: list(args.invariants ?? [], 'invariants'), interfaces: list(args.interfaces ?? [], 'interfaces'), failureTests: list(args.failure_tests ?? [], 'failure_tests'), openQuestions: list(args.open_questions ?? [], 'open_questions'), mathematicalModel: args.mathematical_model ? text(args.mathematical_model, 'mathematical_model', 2000) : '' }, route };
+      const record = { version: 1, kind: 'assignment', taskId: randomUUID(), runId: own.run.runId, parentRunId: own.run.runId, parentId: agent.id, backend: selectedBackend, reasoningDecision: args.reasoning_effort ?? 'default', effectiveCapabilities: capabilities, permissions: permissions(writeScope), taskKind: own.run.taskKind, modelSelection: args.worker_model === undefined ? 'default' : 'leader-selected', criteria: contractCriteria(args.criteria, text(args.acceptance, 'acceptance', 2000)), goal: text(args.goal, 'goal'), writeScope, acceptance: text(args.acceptance, 'acceptance', 2000), constraints: args.constraints ? text(args.constraints, 'constraints', 2000) : '', contract: { invariants: list(args.invariants ?? [], 'invariants'), interfaces: list(args.interfaces ?? [], 'interfaces'), failureTests: list(args.failure_tests ?? [], 'failure_tests'), openQuestions: list(args.open_questions ?? [], 'open_questions'), mathematicalModel: args.mathematical_model ? text(args.mathematical_model, 'mathematical_model', 2000) : '' }, route };
       if (selectedBackend === 'team') {
-        record.teamName = args.name ? text(args.name, 'name', 80) : 'flash-' + record.taskId.slice(0, 8);
+        record.teamName = args.name ? text(args.name, 'name', 80) : 'worker-' + record.taskId.slice(0, 8);
         const nativeTask = await teams().createTask(agent, { subject: record.goal.slice(0, 120), description: `Mentor assignment ${record.taskId}\n${record.goal}\nAcceptance: ${record.acceptance}\nImmutable criteria: ${JSON.stringify(record.criteria)}\nPermissions: ${JSON.stringify(record.permissions)}\nNative completed = submitted work, not mentor acceptance.`, writeScopes: writeScope });
         record.teamTaskId = nativeTask.id;
       }
@@ -444,7 +474,7 @@ export function apply(ctx, config) {
         return { taskId: assignment.taskId, childSessionId: assignment.childId, outcome: 'failed', taskStatus: task(assignment.taskId).status, failure: { code, retryable: 'unknown', summary: 'Native continuation delivery was not confirmed. No replacement worker was created.' }, next: 'Inspect session/provider availability before another manual attempt; do not claim the task resumed.' };
       } finally { recovering.delete(assignment.taskId); }
     });
-    tool('mentor_guide', 'Tutor a blocked or unfinished Flash worker and resume it. Provide a testable diagnosis, concrete next steps, validation and fallback; records guidance in both sessions.', object({
+    tool('mentor_guide', 'Tutor a blocked or unfinished worker and resume it. Provide a testable diagnosis, concrete next steps, validation and fallback; records guidance in both sessions.', object({
       task_id: str('Task returned by mentor_delegate.'), diagnosis: str('Evidence-based diagnosis, explicitly label hypotheses.'), next_steps: str('Specific checks/actions, at most 3000 characters.'), validation: str('Result that confirms or falsifies the advice.'), fallback: str('What to report or do if the check fails.'), purpose: enumeration(['task-guidance', 'implementation-rework', 'report-correction', 'lifecycle-repair'], 'Why the tutor is resuming this worker; recorded separately from implementation rework.')
     }, ['task_id', 'diagnosis', 'next_steps', 'validation', 'fallback']), async (args, exec) => {
       const assignment = task(args.task_id);

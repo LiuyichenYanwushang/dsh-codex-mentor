@@ -10,12 +10,13 @@ const runtime = createRequire(resolve(process.env.DSH_RUNTIME_DIR ?? resolve(dir
 registerHooks({ resolve(specifier, context, next) { return next((specifier.startsWith('@deepseek-ai/') || specifier === 'zod') ? runtime.resolve(specifier) : specifier, context); } });
 const { Context } = await import('@deepseek-ai/cordis');
 const { LlmAdapter, createUserMessage } = await import('@deepseek-ai/dsh-llm');
+const { agentEvents } = await import('@deepseek-ai/dsh-agent');
 const mentor = await import('../index.js');
 const { KEY, fold, initial, view, encode } = await import('../ledger.js');
 const { cooperation } = await import('../experience.js');
 const fixture = fileURLToPath(new URL('./fixtures/contract.txt', import.meta.url));
 const stateOf = (ctx, agent) => ctx.sessionProjections.stateOf(agent.session, KEY);
-const FINAL = 'Native Flash Team fixture accepted independently.';
+const FINAL = 'Native mixed-model Team fixture accepted independently.';
 
 async function* response(name, args) {
   const block = name ? { type: 'tool-call', id: randomUUID(), name, arguments: JSON.stringify(args) } : { type: 'text', text: args };
@@ -31,21 +32,27 @@ class TeamAdapter extends LlmAdapter {
     super(); this.ctx = ctx; this.calls = []; this.steps = new Map(); this.seenBoard = new Map(); this.read = new Set(); this.rosterRead = false;
     this.staffed = new Promise(resolve => { this.releaseStaffing = resolve; });
   }
-  model(provider, id) { return { provider, id, name: 'Scripted native Team fixture', context: { contextWindow: 1000000 }, reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'low' } }; }
-  async listModels(provider) { return [this.model(provider, provider === 'openai-codex' ? 'gpt-6.1-sol' : 'deepseek-flash')]; }
+  model(provider, id) { return { provider, id, name: 'Scripted native Team fixture', ...(provider === 'openai-codex' ? { context: { contextWindow: 128000 }, defaultMaxTokens: 16000, reasoning: { efforts: [{ id: 'medium', name: 'Medium' }], defaultEffort: 'medium' } } : { context: { contextWindow: 1000000 }, reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'low' } }) }; }
+  async listModels(provider) { return ({ 'openai-codex': ['gpt-6.1-sol'], 'deepseek-official': ['deepseek-flash'] }[provider] ?? []).map(id => this.model(provider, id)); }
   async resolveModel(provider, model) { return this.model(provider, model); }
   async *stream(options) {
     const agent = this.ctx.agents.get(options.sessionId), state = stateOf(this.ctx, agent), member = this.ctx.agentTeams.membership(agent);
     const step = this.steps.get(agent.id) ?? 0; this.steps.set(agent.id, step + 1);
-    this.calls.push({ sessionId: agent.id, provider: options.provider, model: options.model, reasoningEffort: options.reasoningEffort });
+    this.calls.push({ sessionId: agent.id, provider: options.provider, model: options.model, maxTokens: options.maxTokens, reasoningEffort: options.reasoningEffort });
     assert.ok(step < 45, 'Finite scripted Team loop exceeded bound: ' + JSON.stringify({ id: agent.id, step, state }).slice(0, 8000));
     const names = options.tools.map(tool => tool.name);
     for (const name of ['team_task_get', 'team_task_update', 'list_agents', 'send_message']) assert.ok(names.includes(name), name + ' must be actual native Team tool');
     if (member.role === 'teammate') {
-      assert.equal(options.provider, 'deepseek-official'); assert.equal(options.model, 'deepseek-flash');
       assert.ok(names.includes('mentor_report')); assert.ok(!names.includes('mentor_delegate'));
       await this.staffed; // Hold all three workers until real native staffing exceeds the configured subagent limit.
       const task = state.tasks[0]; assert.ok(task?.teamTaskId, 'Assignment admitted with linked native task before inference');
+      assert.equal(options.provider, task.route.provider); assert.equal(options.model, task.route.model);
+      if (step === 0 && task.teamName === 'flash-a') {
+        const offOverride = this.ctx.on('agent/request', async ({ agent: subject }, next) => { const selected = await next(); return subject === agent ? { ...selected, provider: 'openai-codex', model: 'gpt-6.1-sol' } : selected; });
+        try {
+          await assert.rejects(agentEvents(this.ctx, agent).waterfall('agent/request', { turn: 0, step: 0, signal: options.signal }, () => Promise.resolve(Object.freeze({ ...task.route }))), /pinned/, 'worker guard rejects an inherited Leader model override before another inference');
+        } finally { offOverride(); }
+      }
       const native = this.ctx.agentTeams.getTask(agent, task.teamTaskId);
       if (native.status === 'pending') {
         if (this.seenBoard.get(agent.id) !== native.revision) {
@@ -66,7 +73,7 @@ class TeamAdapter extends LlmAdapter {
     assert.equal(state.run.backend, 'team');
     if (state.tasks.length < 3) {
       const index = state.tasks.length;
-      yield* response('mentor_delegate', { name: ['flash-a', 'flash-b', 'flash-c'][index], reasoning_effort: ['high', 'low', 'default'][index], goal: 'Independent read-only contract inspection ' + index, write_scope: [], acceptance: 'AC1 contract rejects invalid input; AC2 audit performs no writes', criteria: [{ id: 'AC1', description: 'Contract specifies invalid parser input rejection' }, { id: 'AC2', description: 'Audit performs no source writes' }] }); return;
+      yield* response('mentor_delegate', { ...(index === 1 ? { worker_provider: 'openai-codex', worker_model: 'gpt-6.1-sol' } : {}), name: ['flash-a', 'flash-b', 'flash-c'][index], reasoning_effort: ['high', 'medium', 'default'][index], goal: 'Independent read-only contract inspection ' + index, write_scope: [], acceptance: 'AC1 contract rejects invalid input; AC2 audit performs no writes', criteria: [{ id: 'AC1', description: 'Contract specifies invalid parser input rejection' }, { id: 'AC2', description: 'Audit performs no source writes' }] }); return;
     }
     this.releaseStaffing();
     if (!this.rosterRead) { this.rosterRead = true; yield* response('list_agents', {}); return; }
@@ -120,7 +127,7 @@ function untilAccepted(ctx, agent, action) {
   }).finally(() => { clearTimeout(timer); off?.(); });
 }
 
-test('native Agent Teams pins Flash/effort, claims tasks, tutors/corrects reports, accepts independently and cold-replays stable identities', { timeout: 20000 }, async () => {
+test('native Agent Teams pins mixed models/effort, claims tasks, tutors/corrects reports, accepts independently and cold-replays stable identities', { timeout: 20000 }, async () => {
   const tempRoot = await mkdtemp(join(tmpdir(), 'dsh-mentor-team-native-'));
   let ctx;
   try {
@@ -146,8 +153,11 @@ test('native Agent Teams pins Flash/effort, claims tasks, tutors/corrects report
       const row = roster.find(row => row.name === task.teamName); assert.equal(row.id, task.childId); // Model labels are checked after cold replay so metadata failures do not hide recovery evidence.
       const native = ctx.agentTeams.getTask(handle.agent, task.teamTaskId); assert.equal(native.status, 'completed'); assert.equal(native.ownerName, task.teamName);
       const calls = adapter.calls.filter(call => call.sessionId === task.childId); assert.ok(calls.length > 0);
-      assert.ok(calls.every(call => call.model === 'deepseek-flash' && call.provider === 'deepseek-official' && call.reasoningEffort === (task.teamName === 'flash-a' ? 'high' : 'low')));
-      assert.equal(task.route.reasoningEffort, task.teamName === 'flash-a' ? 'high' : 'low');
+      const custom = task.teamName === 'flash-b', provider = custom ? 'openai-codex' : 'deepseek-official', model = custom ? 'gpt-6.1-sol' : 'deepseek-flash';
+      const effort = custom ? 'medium' : task.teamName === 'flash-a' ? 'high' : 'low', maxTokens = custom ? 16000 : 384000;
+      assert.ok(calls.every(call => call.model === model && call.provider === provider && call.reasoningEffort === effort && call.maxTokens === maxTokens), 'worker inference uses its recorded model capabilities and native output default');
+      assert.deepEqual(task.route, { provider, model, maxTokens, reasoningEffort: effort });
+      assert.equal(task.reasoningDecision, custom ? 'medium' : task.teamName === 'flash-a' ? 'high' : 'default');
       assert.deepEqual(task.criteria.map(({ id }) => id), ['AC1', 'AC2']);
       assert.deepEqual(task.report.evidenceGate.criteria.map(({ id, status }) => ({ id, status })), [{ id: 'AC1', status: 'PASS' }, { id: 'AC2', status: 'PASS' }]);
       assert.deepEqual(task.review.assessments.map(({ criterion }) => criterion), ['AC1', 'AC2']);
@@ -155,8 +165,8 @@ test('native Agent Teams pins Flash/effort, claims tasks, tutors/corrects report
       assert.ok(trace.some(({ sessionId, event }) => sessionId === task.childId && event.type === 'tool/call' && event.data.name === 'team_task_update' && JSON.parse(event.data.arguments).action === 'claim'));
       assert.ok(trace.some(({ sessionId, event }) => sessionId === task.childId && event.type === 'tool/result' && event.data.meta?.codexMentor?.kind === 'report'));
     }
-    assert.ok(trace.some(({ sessionId, event }) => sessionId === handle.agent.id && event.type === 'user/message' && event.data.source?.kind === 'team-message' && event.data.source.senderId === tasks[0].childId), 'Formal reports are delivered with native authenticated sender identity');
-    assert.ok(!trace.some(({ event }) => event.type === 'tool/call' && event.data.name === 'spawn_teammate'), 'No raw spawn bypass or GPT teammate creation');
+    for (const task of tasks) assert.ok(trace.some(({ sessionId, event }) => sessionId === handle.agent.id && event.type === 'user/message' && event.data.source?.kind === 'team-message' && event.data.source.senderId === task.childId), 'Both model routes deliver formal reports with native authenticated sender identity');
+    assert.ok(!trace.some(({ event }) => event.type === 'tool/call' && event.data.name === 'spawn_teammate'), 'No raw spawn bypass; custom model selection uses mentor_delegate');
     const spoof = { ...tasks[0].report, id: randomUUID(), summary: 'Unauthenticated sibling report' };
     const spoofed = fold(actual, { type: 'user/message', seq: handle.agent.session.snapshotEvents().at(-1).seq + 1, data: { source: { kind: 'team-message', teamId: handle.agent.id, senderId: tasks[1].childId, senderName: tasks[1].teamName }, content: [{ type: 'text', text: encode(spoof) }] } });
     assert.deepEqual(view(spoofed), view(actual), 'A real sibling identity cannot submit another member\'s formal report');
@@ -166,7 +176,8 @@ test('native Agent Teams pins Flash/effort, claims tasks, tutors/corrects report
     assert.deepEqual(view(handle.agent.session.snapshotEvents().reduce(fold, initial(handle.agent.session.header))), view(actual));
     const finals = handle.agent.session.snapshotEvents().filter(event => event.type === 'assistant/message').map(event => event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join(''));
     assert.equal(finals.filter(text => text === FINAL).length, 1);
-    assert.equal(adapter.calls.filter(call => call.model === 'deepseek-flash').length, 16, 'Three native get/claim/read/report sequences plus blocked guidance and reopened report correction; no extra inference on submission or acceptance');
+    const workerCalls = adapter.calls.filter(call => call.sessionId !== handle.agent.id);
+    assert.equal(workerCalls.length, 16, 'Three mixed-model native get/claim/read/report sequences plus blocked guidance and reopened report correction; no extra inference on submission or acceptance');
     const callsBefore = adapter.calls.length;
     await handle.dispose();
     const resumed = await ctx.agents.resume({ resumeSessionId: 'native-flash-team-mentor', setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'codex-mentor'); } });
@@ -174,10 +185,18 @@ test('native Agent Teams pins Flash/effort, claims tasks, tutors/corrects report
     assert.deepEqual(cooperation(stateOf(ctx, resumed.agent)), facts);
     const coldRoster = ctx.agentTeams.listMembers(resumed.agent).filter(row => row.role === 'teammate');
     assert.deepEqual(coldRoster.map(row => ({ id: row.id, name: row.name })), roster.map(row => ({ id: row.id, name: row.name })));
+    const rootConfig = resumed.agent.session.requestHeader().config;
+    assert.equal(rootConfig.provider, 'openai-codex'); assert.equal(rootConfig.model, 'gpt-6.1-sol', 'cold restore retains the original Leader selection');
     assert.equal(adapter.calls.length, callsBefore, 'Accepted cold recovery causes no additional model inference');
+    const nativeRoster = tasks.map(task => handle.agent.session.snapshotEvents().findLast(event => event.type === 'team/member' && event.data.member.id === task.childId).data.member);
+    const coldNativeRoster = tasks.map(task => resumed.agent.session.snapshotEvents().findLast(event => event.type === 'team/member' && event.data.member.id === task.childId).data.member);
+    const modelLabels = rows => rows.map(({ model, modelProvider }) => ({ model, modelProvider }));
+    const expectedModels = [{ model: 'deepseek-flash', modelProvider: 'deepseek-official' }, { model: 'gpt-6.1-sol', modelProvider: 'openai-codex' }, { model: 'deepseek-flash', modelProvider: 'deepseek-official' }];
     await resumed.dispose(); off();
-    assert.deepEqual(roster.map(row => row.model), ['deepseek-flash', 'deepseek-flash', 'deepseek-flash'], JSON.stringify({ liveRoster: roster, coldRoster, actualRequests: adapter.calls.filter(call => call.model === 'deepseek-flash') }));
-    assert.deepEqual(coldRoster.map(row => row.model), ['deepseek-flash', 'deepseek-flash', 'deepseek-flash'], 'Native cold roster must preserve actual Flash model labels');
+    assert.deepEqual(roster.map(row => row.model), expectedModels.map(row => row.model), JSON.stringify({ liveRoster: roster, coldRoster, actualRequests: workerCalls }));
+    assert.deepEqual(modelLabels(nativeRoster), expectedModels, 'Stored native roster records the custom worker model and provider');
+    assert.deepEqual(modelLabels(coldNativeRoster), expectedModels, 'Cold native journal preserves both original model/provider pins');
+    assert.deepEqual(coldRoster.map(row => row.model), expectedModels.map(row => row.model), 'Native cold roster preserves actual mixed model labels');
   } finally {
     await ctx?.fiber.dispose();
     const target = resolve(tempRoot); assert.equal(dirname(target), resolve(tmpdir())); assert.match(basename(target), /^dsh-mentor-team-native-/);

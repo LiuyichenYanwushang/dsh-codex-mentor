@@ -1,4 +1,4 @@
-import { reportCriteria, taskSummary, reject } from './protocol.js?mentor=0.8.0';
+import { reportCriteria, taskSummary, reject } from './protocol.js?mentor=0.9.0';
 export const KEY = 'codexMentor';
 export const PRESET = 'codex-mentor';
 export const PREFIX = 'CODEX_MENTOR/1\n';

@@ -8,16 +8,25 @@ DSH 0.2.0-rc.2 的独立模式 bundle。非 OpenAI/DeepSeek 官方产品；提�
 
 - **DeepSeek Harness `0.2.0-rc.2`**：当前精确兼容版本，其他版本尚未验证。
 - **[dsh-codex-connect](https://github.com/franksong2702/dsh-codex-connect)**：**可选**，仅当你选择 Codex/GPT 路由时需要独立安装、启用并完成 ChatGPT OAuth，提供 `openai-codex` GPT 路由；本插件不包含也不替代登录组件。已验证 `0.2.0-alpha.1`。
-- **DeepSeek Flash 路由**：在 DSH 的 Models 设置中配置 DeepSeek 账户或官方 API，确认 `deepseek-flash` 可用。
+- **执行者路由**：默认 Flash，在 DSH 的 Models 设置中配置 DeepSeek 账户或官方 API；0.9.0 起 Leader 也可为新任务明确选择其他已配置、目录中可用的模型。
 - 开发测试需要 Node.js 22.23.2 或更新的兼容版本（原生 `registerHooks`）。
 
-使用其他已配置模型作为 Leader 时只需本导师插件和 Flash 路由；Codex Connect 不是必需依赖，不再需要 `dsh-codex-mentor-live-fix` 或 `dsh-codex-mentor-mode-fix`。
+使用其他已配置模型作为 Leader 时只需本导师插件和可用的执行者路由；Codex Connect 不是必需依赖，不再需要 `dsh-codex-mentor-live-fix` 或 `dsh-codex-mentor-mode-fix`。
 
 ## 使用
 
 安装打包后的 tarball（`npm pack --ignore-scripts --json`），以安装器的 applied/restart-required 状态为准；需要时重启现有 DSH 服务。新建会话，模式选择 **Mentor · 导师协作**，保留当前会话模型担任 Leader，不自动切到 Codex。不改变 Standard 或全局默认模型；已有导师会话会补装 Host 工具，但其 preset 版本不被擅自替换，完整能力以新会话验收。刷新页面可重新获取模式列表。
 
 Flash 默认自动选择已配置且目录中包含 `deepseek-flash`（显示名 DeepSeek-V41-Flash）的 `deepseek-account`，其次 `deepseek-official`。选择发生在派工前，实际路由写入子会话描述和任务记录；推理失败不会自动换成 GPT，也不会切换账户。其他 provider 可以通过 `codex-mentor-host` 配置显式指定。缺凭据时在 Settings → Models 配置；目录可用不是推理成功的证明。
+
+## 0.9.0：Leader 逐任务选择执行者模型
+
+- 不指定时仍默认 Flash；Leader 可自主在新任务的 `mentor_delegate` 中同时指定 `worker_provider` 和 `worker_model`，无需每次询问用户，但必须遵守用户明确的模型/费用限制。两项必须成对；提供方须已注册，模型须由该提供方目录声明；无效选择直接拒绝，不静默换账户或 fallback 到别的模型。
+- 模型发现按需：`mentor_status({detail:"models"})` 返回提供方目录；传 `provider` 列出最多 50 个模型 ID，按 `nextOffset` 翻页；再传 `model_id` 获取该模型的上下文、原生输出默认及推理程度。默认状态不倾倒全部目录。
+- 新任务模型写入任务、子会话和原生名单；普通 continuable 子代理与原生 Teams 都可用。已有任务继续使用原来的 provider/model；执行者不能自行换模型，本轮也不提供中途改执行者模型的入口。换 Leader 不改变它们。
+- Flash 使用配置的 384k 请求预算；其他模型不继承这个值，由原生解析器使用各自输出默认。请求预算写入日志，并在每次子代理请求/冷恢复时恢复，不被 continuable 描述符遗漏。推理程度按选定模型验证，不复用 Flash 的能力标签。
+- 73/73 确定性测试通过；真实 SDK 循环混用默认 Flash 和明确指定的 Codex 执行者，验证各自 384k/16k 请求预算与推理程度、同一身份/报告/标准、原生名单日志、独立接受、回放及冷恢复。Flash 元数据默认 256k 的 fixture 仍按记录请求 384k，避免仅靠 fixture 默认值掩盖遗漏。脚本适配器测试，不是外部推理；未恢复旧项目任务。
+- 默认 Flash 不可用时，`mentor_begin` 如实返回 `workerRouteReady:false` 与 `defaultWorkerError`，但已就绪的协作后端可等待 Leader 明确选择其他可用路由；未开始任何执行者。缺工具或原生 Teams API 仍进入 diagnostic，不能借选模型绕过。
 
 ## 0.8.0：当前模型 Leader，可选协作后端
 

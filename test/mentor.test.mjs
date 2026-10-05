@@ -139,7 +139,7 @@ function harness(overrides = {}) {
     },
     subagents: {
       startContinuable: async spec => {
-        assert.equal(spec.provider, 'spawn'); assert.equal(spec.request.agentOptions.model, 'deepseek-flash'); assert.equal(spec.request.maxDepth, 1);
+        assert.equal(spec.provider, 'spawn'); assert.deepEqual(spec.request.agentOptions, JSON.parse(spec.request.prompt[0].text.split('\n')[1]).route); assert.equal(spec.request.maxDepth, 1);
         const child = await makeAgent(spec.childId ?? 'child-' + (++n), spec.request.parent.id);
         append(child, 'user/message', { source: { kind: 'user' }, content: spec.request.prompt });
         return { childId: child.id, messageId: 'assignment-' + n };
@@ -280,6 +280,59 @@ test('new-run backend override is explicit and unavailable team fails closed wit
   const chosen = await h.call(leader, 'mentor_begin', { mode: 'collaborative', task: 'Now choose plain workers', backend: 'subagent' });
   assert.equal(chosen.record.backend, 'subagent'); assert.equal(chosen.record.mode, 'collaborative');
   assert.equal(chosen.workerStarted, false);
+});
+
+test('Leader selects a model for one new worker, while default workers and old task routes remain fixed', async () => {
+  const h = harness(), leader = await h.makeAgent('model-select');
+  const calls = [];
+  h.ctx.llm.resolveCallConfig = async options => { calls.push({ ...options }); return { ...options, maxTokens: options.maxTokens ?? 16000 }; };
+  const first = (await h.call(leader, 'mentor_delegate', { goal: 'Default task', write_scope: [], acceptance: 'A' })).record;
+  const custom = (await h.call(leader, 'mentor_delegate', { goal: 'Special task', write_scope: [], acceptance: 'B', worker_provider: 'openai-codex', worker_model: 'gpt-6.1-sol' })).record;
+  assert.equal(first.route.model, 'deepseek-flash'); assert.equal(first.route.maxTokens, 384000); assert.equal(first.modelSelection, 'default');
+  assert.equal(custom.route.provider, 'openai-codex'); assert.equal(custom.route.model, 'gpt-6.1-sol'); assert.equal(custom.route.maxTokens, 16000); assert.equal(custom.modelSelection, 'leader-selected');
+  assert.equal(Object.hasOwn(calls.find(row => row.model === 'gpt-6.1-sol'), 'maxTokens'), false, 'Flash budget is not sent to another model');
+  const worker = h.agents.get(custom.childId);
+  assert.equal(h.tools.get(worker.id).has('mentor_delegate'), false);
+  const status = await h.call(worker, 'mentor_status', {});
+  assert.equal(status.capabilities.worker.route.model, 'gpt-6.1-sol', 'worker sees its actual assignment, not default Flash');
+  await assert.rejects(worker.localHandlers.get('agent/request')({}, async () => first.route), /pinned/);
+  assert.deepEqual(await worker.localHandlers.get('agent/request')({}, async () => custom.route), custom.route);
+  assert.deepEqual(h.state(leader).tasks.find(row => row.taskId === first.taskId).route, first.route);
+  assert.deepEqual(view(leader.session.events.reduce(fold, initial(leader.session.header))).tasks, view(h.state(leader)).tasks);
+});
+
+test('worker route overrides require a valid pair and cannot start an unadvertised model or provider', async () => {
+  const h = harness(), leader = await h.makeAgent('invalid-model');
+  const base = { goal: 'Invalid choice', write_scope: [], acceptance: 'A' };
+  for (const selection of [{ worker_model: 'gpt-6.1-sol' }, { worker_provider: 'openai-codex' }]) await assert.rejects(h.call(leader, 'mentor_delegate', { ...base, ...selection }), /WORKER_ROUTE_PAIR_REQUIRED/);
+  for (const selection of [{ worker_provider: 'unknown', worker_model: 'gpt-6.1-sol' }, { worker_provider: 'openai-codex', worker_model: 'unknown' }]) await assert.rejects(h.call(leader, 'mentor_delegate', { ...base, ...selection }), /WORKER_ROUTE_UNAVAILABLE/);
+  assert.equal(h.agents.size, 1); assert.equal(h.state(leader).tasks.length, 0);
+});
+
+test('missing default Flash route does not prohibit an explicitly selected configured worker', async () => {
+  const h = harness(), leader = await h.makeAgent('other-default');
+  h.ctx.llm.listModels = async provider => provider === 'openai-codex' ? [{ id: 'gpt-6.1-sol' }] : [];
+  const begin = await h.call(leader, 'mentor_begin', { mode: 'collaborative', task: 'Available model only' });
+  assert.equal(begin.record.mode, 'collaborative'); assert.equal(begin.workerRouteReady, false); assert.match(begin.defaultWorkerError, /Default worker unavailable/);
+  const result = await h.call(leader, 'mentor_delegate', { goal: 'Explicit model', write_scope: [], acceptance: 'A', worker_provider: 'openai-codex', worker_model: 'gpt-6.1-sol' });
+  assert.equal(result.record.route.model, 'gpt-6.1-sol'); assert.equal(h.agents.size, 2);
+});
+
+test('model discovery is on demand, paginated and reports capabilities of the selected model', async () => {
+  const h = harness(), leader = await h.makeAgent('catalog');
+  const before = snapshotJsonValue(h.state(leader));
+  const directory = await h.call(leader, 'mentor_status', { detail: 'models' });
+  assert.equal(directory.defaultWorker.model, 'deepseek-flash'); assert.equal(directory.providers.length, 2); assert.equal(Object.hasOwn(directory, 'models'), false);
+  h.ctx.llm.listModels = async () => Array.from({ length: 110 }, (_, i) => ({ id: `model-${i}` }));
+  const page = await h.call(leader, 'mentor_status', { detail: 'models', provider: 'openai-codex', offset: 50 });
+  assert.equal(page.models.length, 50); assert.equal(page.models[0].id, 'model-50'); assert.equal(page.nextOffset, 100);
+  h.ctx.llm.resolveModelInfo = async (provider, id) => ({ provider, id, context: { contextWindow: 128000 }, defaultMaxTokens: 16000, reasoning: { efforts: [{ id: 'medium' }] } });
+  const info = await h.call(leader, 'mentor_status', { detail: 'models', provider: 'openai-codex', model_id: 'model-80' });
+  assert.equal(info.context.contextWindow, 128000); assert.equal(info.nativeDefaultMaxTokens, 16000); assert.equal(info.reasoning.efforts[0].id, 'medium'); assert.equal(info.inferenceTested, false);
+  await assert.rejects(h.call(leader, 'mentor_status', { detail: 'models', provider: 'unknown' }), /WORKER_PROVIDER_UNAVAILABLE/);
+  await assert.rejects(h.call(leader, 'mentor_status', { detail: 'models', provider: 'openai-codex', model_id: 'unknown' }), /WORKER_MODEL_UNAVAILABLE/);
+  await assert.rejects(h.call(leader, 'mentor_status', { detail: 'models', provider: 'openai-codex', offset: -1 }), /MODEL_OFFSET_INVALID/);
+  assert.deepEqual(h.state(leader), before); assert.equal(h.agents.size, 1);
 });
 
 test('worker catalog failure never creates a GPT fallback child', async () => {
