@@ -1,8 +1,9 @@
-import { reportCriteria, taskSummary, reject } from './protocol.js?mentor=0.9.0';
+import { reportCriteria, taskSummary, reject } from './protocol.js?mentor=0.10.0';
+import { fileReference, materialEntries, materialSummary } from './materials.js?mentor=0.10.0';
 export const KEY = 'codexMentor';
 export const PRESET = 'codex-mentor';
 export const PREFIX = 'CODEX_MENTOR/1\n';
-export const MUTATIONS = ['mentor_begin', 'mentor_verify', 'mentor_delegate', 'mentor_report', 'mentor_guide', 'mentor_resume', 'mentor_review', 'mentor_memory'];
+export const MUTATIONS = ['mentor_begin', 'mentor_verify', 'mentor_delegate', 'mentor_report', 'mentor_guide', 'mentor_resume', 'mentor_review', 'mentor_memory', 'mentor_materials'];
 export const DIRECT_QUESTION_ID = 'codex-mentor-direct';
 export const DIRECT_LABEL = '本次直接执行';
 export const INSPECTION_TOOLS = ['read', 'read_image', 'glob', 'grep', 'bash', 'web_search', 'web_fetch'];
@@ -25,7 +26,7 @@ export function argsObject(value, keys) {
   return value;
 }
 export function initial(header, inheritedEventCount = 0) {
-  return { sessionId: header.id, parentId: header.origin === 'subagent' ? header.parentSession ?? null : null, floor: inheritedEventCount, tasks: [], checkpoint: '', checkpointSeq: -1, notes: [], pending: {}, run: null, lastCompletedRun: null, lastInputId: null, recentInputIds: [], consent: null, permissionCalls: {}, recentRecordIds: [] };
+  return { sessionId: header.id, parentId: header.origin === 'subagent' ? header.parentSession ?? null : null, floor: inheritedEventCount, tasks: [], materials: [], uploads: [], checkpoint: '', checkpointSeq: -1, notes: [], pending: {}, run: null, lastCompletedRun: null, lastInputId: null, recentInputIds: [], consent: null, permissionCalls: {}, recentRecordIds: [] };
 }
 export function encode(record) {
   const json = JSON.stringify({ version: 1, ...record });
@@ -61,6 +62,7 @@ function decode(content) {
           choice(value.verdict, 'verdict', ['accepted', 'rework', 'cancelled', 'closed-unaccepted']); text(value.evidence, 'evidence');
           break;
         case 'assignment':
+          if (value.materials !== undefined) materialEntries(value.materials);
           text(value.parentId, 'parentId', 100); text(value.goal, 'goal'); list(value.writeScope, 'writeScope'); text(value.acceptance, 'acceptance', 2000);
           break;
         default: return null;
@@ -86,6 +88,9 @@ function update(state, record, seq) {
     if (record.action !== 'forget') notes.push({ ...record, seq });
     return { ...state, notes };
   }
+  if (record.kind === 'materials' && !state.parentId) {
+    try { return { ...state, materials: materialEntries(record.entries) }; } catch { return state; }
+  }
   if (typeof record.taskId !== 'string') return state;
   const index = state.tasks.findIndex(task => task.taskId === record.taskId);
   if (index < 0 && record.kind !== 'assignment' && record.kind !== 'delegated') return state;
@@ -94,7 +99,9 @@ function update(state, record, seq) {
   let task;
   switch (record.kind) {
     case 'delegated':
-    case 'assignment': task = { ...previous, ...record, status: record.provisioning ? 'provisioning' : (!previous.status || previous.status === 'provisioning') ? 'implementing' : previous.status, seq }; break;
+    case 'assignment':
+      if (state.parentId && record.materials) { try { state = { ...state, materials: materialEntries(record.materials) }; } catch { return state; } }
+      task = { ...previous, ...record, status: record.provisioning ? 'provisioning' : (!previous.status || previous.status === 'provisioning') ? 'implementing' : previous.status, seq }; break;
     case 'report':
       if (record.childId !== previous.childId) return state;
       if (record.evidenceGate) { try { reportCriteria(record.evidenceGate.criteria, previous.criteria ?? null); } catch { return state; } }
@@ -152,6 +159,11 @@ export function fold(state, event) {
   if (event.type !== 'user/message') return state;
   const message = event.data;
   if (!state.parentId && message.source?.kind === 'user') {
+    if (!event.surfaceOp || event.surfaceOp === 'append') {
+      const uploads = new Map((state.uploads ?? []).map(ref => [ref.attachmentId, ref]));
+      for (const block of message.content ?? []) { const ref = block.type === 'file' ? fileReference(block.attachment) : null; if (ref && !uploads.has(ref.attachmentId)) uploads.set(ref.attachmentId, ref); }
+      if (uploads.size !== (state.uploads ?? []).length) state = { ...state, uploads: [...uploads.values()] };
+    }
     // A durable input can also be spliced later; that is not a new human request.
     const fresh = !message.id || !state.recentInputIds.includes(message.id);
     if (fresh && (!event.surfaceOp || event.surfaceOp === 'append') && !state.tasks.some(task => !TERMINAL.includes(task.status))) {
@@ -184,7 +196,7 @@ export function fold(state, event) {
   return state;
 }
 export function view(state) {
-  return { sessionId: state.sessionId, role: state.parentId ? 'worker' : 'mentor', run: state.run, activeRun: state.run, lastCompletedRun: state.lastCompletedRun, directAuthorized: !!state.consent, checkpoint: state.checkpoint, tasks: state.tasks, activeTasks: state.tasks.filter(task => !TERMINAL.includes(task.status)), recentTaskSummaries: state.tasks.slice(-8).map(task => ({ taskId: task.taskId, runId: task.runId, childId: task.childId, goal: task.goal?.slice(0, 200), status: task.status, registeredChecks: task.verifications?.length ?? 0 })), notes: state.notes };
+  return { sessionId: state.sessionId, role: state.parentId ? 'worker' : 'mentor', run: state.run, activeRun: state.run, lastCompletedRun: state.lastCompletedRun, directAuthorized: !!state.consent, checkpoint: state.checkpoint, tasks: state.tasks, activeTasks: state.tasks.filter(task => !TERMINAL.includes(task.status)), recentTaskSummaries: state.tasks.slice(-8).map(task => ({ taskId: task.taskId, runId: task.runId, childId: task.childId, goal: task.goal?.slice(0, 200), status: task.status, registeredChecks: task.verifications?.length ?? 0 })), notes: state.notes, materials: (state.materials ?? []).map(materialSummary) };
 }
 export function contextText(state) {
   const outstanding = state.tasks.filter(task => !TERMINAL.includes(task.status));

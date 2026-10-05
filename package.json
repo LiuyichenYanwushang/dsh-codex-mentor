@@ -1,7 +1,7 @@
 {
   "name": "dsh-codex-mentor",
-  "version": "0.9.0",
-  "description": "Mentor collaboration: current-model leader, default-Flash or Leader-selected worker models via subagents or native Teams, strict acceptance and replayable memory.",
+  "version": "0.10.0",
+  "description": "Mentor collaboration: current-model leader, default-Flash or Leader-selected worker models via subagents or native Teams, shared attachments/PDF text reading, strict acceptance and replayable memory.",
   "private": true,
   "repository": { "type": "git", "url": "https://github.com/LiuyichenYanwushang/dsh-codex-mentor.git" },
   "homepage": "https://github.com/LiuyichenYanwushang/dsh-codex-mentor#readme",

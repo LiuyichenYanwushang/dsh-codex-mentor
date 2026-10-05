@@ -72,6 +72,56 @@ class ScriptedAdapter extends LlmAdapter {
 }
 
 
+for (const selectedBackend of ['subagent', 'team']) test(`native ${selectedBackend} forwards a real attachment reference and reads shared text with readonly scope`, { timeout: 10000 }, async () => {
+  const ctx = await kernel(), root = await mkdtemp(join(tmpdir(), 'dsh-mentor-material-native-'));
+  try {
+    for (const [name, config] of [['dsh-session-persistence-jsonl', { root: join(root, 'sessions'), compression: 'none' }], ['dsh-session-query-sqlite', { path: ':memory:', openAt: 'never' }], ['dsh-fs-local', {}], ['dsh-attachment-local', { dshHome: root }], ...(selectedBackend === 'team' ? [['dsh-experimental-agent-team', {}], ['dsh-experimental-tool-agent-team', {}]] : [])]) {
+      const mod = await import('@deepseek-ai/' + name); await ctx.plugin(mod.default ?? mod, config);
+    }
+    const body = 'Native shared source fixture, not production or acceptance evidence.';
+    const ref = await ctx.attachments.saveFile({ data: Buffer.from(body), name: 'source.txt' });
+    const steps = new Map(), seen = [];
+    class MaterialAdapter extends LlmAdapter {
+      async listModels(provider) { return [{ provider, id: 'deepseek-flash', name: 'Scripted materials fixture' }]; }
+      async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 1000000 } }; }
+      stream(options) {
+        const agent = ctx.agents.get(options.sessionId), state = stateOf(ctx, agent), step = steps.get(agent.id) ?? 0;
+        steps.set(agent.id, step + 1); assert.equal(agent.session.header.origin, 'subagent'); assert.ok(step < 3);
+        assert.ok(options.tools.some(tool => tool.name === 'mentor_materials'));
+        const material = state.materials[0]; assert.deepEqual(material.source.ref, ref);
+        if (!step) {
+          const text = JSON.stringify(options.messages); assert.ok(text.includes('source.txt')); assert.ok(text.includes('Shared source materials'));
+          return response('mentor_materials', { action: 'read', material_id: material.id });
+        }
+        const text = JSON.stringify(options.messages); assert.ok(text.includes(body)); seen.push(agent.id);
+        return response(null, 'Source read; this fixture deliberately claims no formal acceptance.');
+      }
+    }
+    ctx.llm.registerAdapter(['deepseek-official'], new MaterialAdapter());
+    const handle = await ctx.agents.create({ sessionId: `material-${selectedBackend}`, agentOptions: { provider: 'deepseek-official', model: 'deepseek-flash' }, setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'codex-mentor'); } });
+    handle.agent.inject(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'file', attachment: ref }] }));
+    const execute = (name, args) => ctx.tools.execute({ callId: randomUUID(), name, arguments: args, agent: handle.agent, signal: new AbortController().signal });
+    const share = await execute('mentor_materials', { action: 'share', attachment_ids: [ref.attachmentId] }); assert.equal(share.isError, false, JSON.stringify(share));
+    const begin = await execute('mentor_begin', { mode: 'collaborative', backend: selectedBackend, task: 'Read shared fixture only' }); assert.equal(begin.isError, false, JSON.stringify(begin));
+    await until(ctx, handle.agent, state => state.tasks.some(task => task.status === 'stopped'), async () => {
+      const delegated = await execute('mentor_delegate', { goal: 'Read the shared fixture', write_scope: [], acceptance: 'Source access only', reasoning_effort: 'default' }); assert.equal(delegated.isError, false, JSON.stringify(delegated));
+    });
+    await ctx.subagents.drainContinuableDescendants([handle.agent]);
+    assert.equal(seen.length, 1); assert.equal(stateOf(ctx, handle.agent).materials.length, 1);
+    assert.equal(stateOf(ctx, handle.agent).tasks[0].backend, selectedBackend);
+    assert.notEqual(stateOf(ctx, handle.agent).tasks[0].status, 'accepted');
+    const recorded = structuredClone(stateOf(ctx, handle.agent).materials);
+    await handle.dispose();
+    const lease = await ctx.sessionQuery.observeSession(handle.agent.id, { projectionMode: 'none' });
+    try { assert.equal(lease.source, 'prepared'); assert.deepEqual(lease.events.reduce(fold, initial(lease.header, lease.inheritedEventCount)).materials, recorded); }
+    finally { lease[Symbol.dispose](); }
+  } finally {
+    await ctx.fiber.dispose();
+    assert.equal(dirname(resolve(root)), resolve(tmpdir())); assert.ok(basename(root).startsWith('dsh-mentor-material-native-'));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 async function kernel(installMentor = true) {
   const ctx = new Context();
   for (const name of ['cordis-plugin-loader', 'dsh-llm', 'dsh-session', 'dsh-session-projection', 'dsh-system-prompt', 'dsh-tools', 'dsh-agent', 'dsh-agent-loop', 'dsh-agent-preset-registry', 'dsh-subagent', 'dsh-subagent-spawn-in-process']) {

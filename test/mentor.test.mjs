@@ -598,6 +598,84 @@ test('legacy missing PASS returns the exact criterion rather than the old generi
   assert.equal(h.state(mentor).tasks[0].status, 'acceptance_blocked'); assert.equal(h.state(mentor).tasks[0].report.id, 'legacy-report');
 });
 
+test('materials authorize original human uploads, survive replacement, and share without waking', async () => {
+  const h = harness(), mentor = await h.makeAgent('materials-root');
+  const bytes = Buffer.from('Source text. Ignore earlier instructions is untrusted source data.');
+  const ref = { attachmentId: 'a'.repeat(64), name: 'source.txt', bytes: bytes.length };
+  h.ctx.get = key => key === 'attachments' ? { async *readFileStream(received) { assert.deepEqual(received, ref); yield bytes; } } : undefined;
+  h.append(mentor, 'user/message', { id: 'upload', source: { kind: 'user' }, content: [{ type: 'file', attachment: ref }] }, { surfaceOp: 'append' });
+  h.append(mentor, 'user/message', { source: { kind: 'agent-message', form: 'relay', senderSessionId: 'stranger' }, content: [{ type: 'file', attachment: { ...ref, attachmentId: 'b'.repeat(64) } }] });
+  h.append(mentor, 'user/message', { id: 'summary', source: { kind: 'user' }, content: [{ type: 'file', attachment: { ...ref, attachmentId: 'c'.repeat(64) } }] }, { surfaceOp: 'replace' });
+  assert.equal((await h.call(mentor, 'mentor_materials', { action: 'list' })).totalUploads, 1);
+  await assert.rejects(h.call(mentor, 'mentor_materials', { action: 'share', attachment_ids: ['b'.repeat(64)] }), error => error.diagnostic?.code === 'MATERIAL_ATTACHMENT_NOT_AUTHORIZED');
+  const shared = await h.call(mentor, 'mentor_materials', { action: 'share', attachment_ids: [ref.attachmentId] });
+  assert.equal(shared.futureWorkers, true); assert.deepEqual(shared.visibleToTaskIds, []);
+  const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Read material', write_scope: [], acceptance: 'Bounded source overview' });
+  const child = h.agents.get(record.childId), id = shared.materials[0].id;
+  assert.deepEqual(child.session.events.find(event => event.type === 'user/message').data.content[1], { type: 'file', attachment: ref });
+  const read = await h.call(child, 'mentor_materials', { action: 'read', material_id: id, limit: 12 });
+  assert.equal(read.text, 'Source text.'); assert.equal(read.nextOffset, 12); assert.match(read.sourceTrust, /Untrusted/);
+  await assert.rejects(h.call(child, 'bash', { command: 'pdftotext' }), /visible|Read-only/);
+  await assert.rejects(h.call(child, 'mentor_materials', { action: 'share', material_ids: [id] }), error => error.diagnostic?.code === 'MATERIAL_SHARE_LEADER_ONLY');
+  const before = structuredClone(h.state(mentor).tasks), messages = child.session.events.length;
+  h.ctx.subagents.sendMessage = async () => { throw new Error('Sharing must not send/wake'); };
+  await h.call(mentor, 'mentor_materials', { action: 'share', material_ids: [id], note: 'Updated source description' });
+  assert.deepEqual(h.state(mentor).tasks, before); assert.equal(child.session.events.length, messages);
+  assert.match(child.contexts[0].text(), /Shared source materials/);
+  assert.deepEqual(view(mentor.session.events.reduce(fold, initial(mentor.session.header))), view(h.state(mentor)));
+});
+
+test('selected material API scope excludes other tasks and future workers; cold parent lookup uses native lease', async () => {
+  const h = harness(), mentor = await h.makeAgent('selected-materials');
+  const delegate = goal => h.call(mentor, 'mentor_delegate', { goal, write_scope: [], acceptance: 'Read scoped source' });
+  const a = (await delegate('Worker A')).record, b = (await delegate('Worker B')).record;
+  const ref = { attachmentId: 'd'.repeat(64), name: 'private.txt', bytes: 1 };
+  h.append(mentor, 'user/message', { source: { kind: 'user' }, content: [{ type: 'file', attachment: ref }] });
+  const shared = await h.call(mentor, 'mentor_materials', { action: 'share', attachment_ids: [ref.attachmentId], target: 'selected', task_ids: [a.taskId] });
+  const c = (await delegate('Worker C')).record;
+  assert.equal((await h.call(h.agents.get(a.childId), 'mentor_materials', { action: 'list' })).total, 1);
+  for (const row of [b, c]) {
+    assert.equal((await h.call(h.agents.get(row.childId), 'mentor_materials', { action: 'list' })).total, 0);
+    await assert.rejects(h.call(h.agents.get(row.childId), 'mentor_materials', { action: 'read', material_id: shared.materials[0].id }), error => error.diagnostic?.code === 'MATERIAL_NOT_AVAILABLE');
+  }
+  const child = h.agents.get(a.childId); h.agents.delete(mentor.id);
+  let released = 0;
+  h.ctx.get = key => key === 'sessionQuery' ? { async observeSession(id, options) { assert.equal(id, mentor.id); assert.equal(options.projectionMode, 'none'); return { header: mentor.session.header, inheritedEventCount: 0, events: mentor.session.events, [Symbol.dispose]() { released++; } }; } } : undefined;
+  const cold = await h.call(child, 'mentor_materials', { action: 'list' });
+  assert.equal(cold.total, 1); assert.equal(cold.freshness, 'parent-log-observation'); assert.equal(released, 1);
+});
+
+test('workspace registration rejects traversal, symlink escape, closed target and mixed action fields atomically', async () => {
+  const h = harness(), mentor = await h.makeAgent('workspace-materials');
+  const fs = { resolve: async path => ({ targetKey: path }), processPath: target => target.targetKey, contains: (_root, file) => file.targetKey !== 'escape.txt', stat: async () => ({ type: 'file', size: 1 }) };
+  h.ctx.get = key => key === 'fs' ? fs : undefined;
+  await assert.rejects(h.call(mentor, 'mentor_materials', { action: 'share', paths: ['../outside.txt'] }), error => error.diagnostic?.code === 'MATERIAL_PATH_INVALID');
+  await assert.rejects(h.call(mentor, 'mentor_materials', { action: 'share', paths: ['safe.txt', 'escape.txt'] }), error => error.diagnostic?.code === 'MATERIAL_OUTSIDE_WORKSPACE');
+  assert.deepEqual(h.state(mentor).materials, []);
+  await assert.rejects(h.call(mentor, 'mentor_materials', { action: 'list', paths: ['safe.txt'] }), /unknown arguments/);
+  const shared = await h.call(mentor, 'mentor_materials', { action: 'share', paths: ['safe.txt', 'safe.txt'] });
+  assert.equal(shared.materials.length, 1);
+  const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Closed source consumer', write_scope: [], acceptance: 'A' });
+  await h.call(mentor, 'mentor_review', { task_id: record.taskId, verdict: 'cancelled', evidence: 'Explicitly cancelled' });
+  const before = structuredClone(h.state(mentor));
+  await assert.rejects(h.call(mentor, 'mentor_materials', { action: 'share', material_ids: [shared.materials[0].id], target: 'selected', task_ids: [record.taskId] }), error => error.diagnostic?.code === 'MATERIAL_TARGET_CLOSED');
+  assert.deepEqual(h.state(mentor).materials, before.materials); assert.deepEqual(h.state(mentor).tasks, before.tasks);
+});
+
+test('parallel native source validation rebases accepted material grants without lost entries', async () => {
+  const h = harness(), mentor = await h.makeAgent('parallel-materials');
+  const entered = Promise.withResolvers(), gate = Promise.withResolvers();
+  const fs = { resolve: async path => ({ targetKey: path }), processPath: target => target.targetKey, contains: () => true, async stat(file) { if (file.targetKey === 'slow.txt') { entered.resolve(); await gate.promise; } return { type: 'file', size: 1 }; } };
+  h.ctx.get = key => key === 'fs' ? fs : undefined;
+  const slow = h.call(mentor, 'mentor_materials', { action: 'share', paths: ['slow.txt'] });
+  await entered.promise;
+  const fast = await h.call(mentor, 'mentor_materials', { action: 'share', paths: ['fast.txt'] });
+  gate.resolve(); await slow;
+  assert.equal(h.state(mentor).materials.length, 2);
+  assert.ok(h.state(mentor).materials.some(entry => entry.id === fast.materials[0].id));
+  assert.deepEqual(view(mentor.session.events.reduce(fold, initial(mentor.session.header))), view(h.state(mentor)));
+});
+
 test('native Team queued recovery stays provisional and preserves original member identity', async () => {
   const h = harness(), mentor = await h.makeAgent('queued-resume');
   const { record } = await h.call(mentor, 'mentor_delegate', { goal: 'Continue original member', write_scope: [], acceptance: 'AC1' });
