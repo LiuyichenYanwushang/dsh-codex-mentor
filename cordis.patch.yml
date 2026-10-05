@@ -1,11 +1,25 @@
+# Native positive-integer contracts have no unlimited sentinel; remove practical count quotas without patching the SDK.
+- id: subagent
+  name: '@deepseek-ai/dsh-subagent'
+  config:
+    maxDepth: 1
+    maxActiveSubagents: 9007199254740991
+- id: agent-team
+  name: '@deepseek-ai/dsh-experimental-agent-team'
+  config:
+    maxMembers: 9007199254740991
+    maxTasks: 9007199254740991
+    maxPendingMessagesPerMember: 64
+    maxMessageBytes: 65536
+    disposalTimeoutMs: 5000
 - insert:
     - id: codex-mentor-host
-      name: './host-0.10.0.js'
+      name: './host-0.10.1.js'
       config:
         workerProvider: auto
         workerModel: deepseek-flash
         workerMaxTokens: 384000
-        maxConcurrentWorkers: 3 # Subagent backend only; native Team staffing belongs to the mentor.
+        maxConcurrentWorkers: 0 # No default count quota; optional positive values limit only the subagent backend.
         requireGptMentor: false
         workerBackend: auto # auto | subagent | team; leaders keep the session's model.
     - id: preset-codex-mentor

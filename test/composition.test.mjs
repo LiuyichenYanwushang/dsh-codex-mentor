@@ -10,7 +10,7 @@ const schema = yaml.JSON_SCHEMA.extend(new yaml.Type('tag:yaml.org,2002:js', { k
 
 export async function readPreset() {
   const patches = yaml.load(await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8'), { schema });
-  return patches[0].insert.find(row => row.id === 'preset-codex-mentor');
+  return patches.flatMap(patch => patch.insert ?? []).find(row => row.id === 'preset-codex-mentor');
 }
 
 test('every active preset plugin satisfies its installed native Config schema', async () => {
@@ -36,7 +36,7 @@ test('one portable bundle contains the versioned Host, current-model leader and 
   const patchUrl = new URL('../cordis.patch.yml', import.meta.url);
   const patches = yaml.load(await readFile(patchUrl, 'utf8'), { schema });
   const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
-  const host = patches[0].insert.find(row => row.id === 'codex-mentor-host');
+  const host = patches.flatMap(patch => patch.insert ?? []).find(row => row.id === 'codex-mentor-host');
   const entry = new URL(host.name, patchUrl);
   assert.equal(entry.pathname, new URL(`../host-${pkg.version}.js`, import.meta.url).pathname);
   const wrapper = await readFile(entry, 'utf8');

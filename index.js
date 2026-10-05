@@ -4,9 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { scopeOf, scopeParentOf } from '@deepseek-ai/dsh-scope';
-import { KEY, PRESET, TERMINAL, initial, fold, view, contextText, encode, text, choice, list, argsObject } from './ledger.js?mentor=0.10.0';
-import { MENTOR, WORKER } from './prompts.js?mentor=0.10.0';
-import { toolReadiness, cooperation, effectiveCapabilities, BYPASS, DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './experience.js?mentor=0.10.0';
+import { KEY, PRESET, TERMINAL, initial, fold, view, contextText, encode, text, choice, list, argsObject } from './ledger.js?mentor=0.10.1';
+import { MENTOR, WORKER } from './prompts.js?mentor=0.10.1';
+import { toolReadiness, cooperation, effectiveCapabilities, BYPASS, DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './experience.js?mentor=0.10.1';
 
 export const name = 'codex-mentor';
 export const inject = ['tools', 'systemPrompt', 'sessionProjections', 'subagents', 'agents', 'agentPresets', 'llm'];
@@ -14,7 +14,7 @@ export const Config = z.object({
   workerProvider: z.string().default('auto'),
   workerModel: z.string().default('deepseek-flash'),
   workerMaxTokens: z.number().step(1).min(1024).max(384000).default(384000),
-  maxConcurrentWorkers: z.number().step(1).min(1).max(8).default(3),
+  maxConcurrentWorkers: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(0),
   requireGptMentor: z.boolean().default(false),
   workerBackend: z.union([z.const('auto'), z.const('subagent'), z.const('team')]).default('auto')
 });
@@ -22,10 +22,10 @@ const str = description => ({ type: 'string', description });
 const enumeration = (values, description) => ({ type: 'string', enum: values, description });
 const strings = description => ({ type: 'array', items: { type: 'string' }, description });
 const object = (properties, required = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false });
-import { reject, contractCriteria, reportCriteria, taskSummary, permissions, evidenceReuse } from './protocol.js?mentor=0.10.0';
+import { reject, contractCriteria, reportCriteria, taskSummary, permissions, evidenceReuse } from './protocol.js?mentor=0.10.1';
 const contractSchema = { type: 'array', items: object({ id: str('Immutable short ASCII ID, e.g. A.'), description: str('Exact bounded acceptance requirement.') }), description: '1–16 immutable criteria; omitted means one AC1 for acceptance. IDs, not titles, bind reports and assessments.' };
-import { materialEntries, visibleMaterials, materialSummary, materialsContext } from './materials.js?mentor=0.10.0';
-import { readMaterial } from './material-reader.js?mentor=0.10.0';
+import { materialEntries, visibleMaterials, materialSummary, materialsContext } from './materials.js?mentor=0.10.1';
+import { readMaterial } from './material-reader.js?mentor=0.10.1';
 const resultCriteriaSchema = { type: 'array', items: { oneOf: [object({ id: str('Exact assignment criterion ID.'), status: enumeration(['PASS', 'FAIL', 'UNVERIFIED'], 'Worker claim only, never mentor acceptance.'), evidence: str('Observed result or attributed source.'), scope: str('Coverage, source date/version and what was not verified.') }), str('Legacy tasks without fixed criteria only.') ] }, description: 'For ready-review: one structured result per immutable assignment ID. Put correction history in deviations, not extra criteria.' };
 
 export function apply(ctx, config) {
@@ -73,7 +73,7 @@ export function apply(ctx, config) {
     const providers = ctx.llm.listProviders();
     const mentorModels = config.requireGptMentor && providers.some(item => item.id === 'openai-codex') ? await ctx.llm.listModels('openai-codex') : [];
     const presets = await ctx.agentPresets.list();
-    return { version: '0.10.0', backend: chooseBackend(), backendSelection: config.workerBackend ?? 'auto', nativeTeams: { enabled: !!ctx.get?.('agentTeams'), modelOptionsSupported: ctx.get?.('agentTeams')?.supportsAgentOptions === true }, flashCapabilities: { contextWindow: 1000000, maxOutputTokens: 384000, configuredOutputBudget: config.workerMaxTokens }, preset: presets.find(item => item.id === PRESET) ?? null, worker, workerSelection: { defaultModel: config.workerModel, perTask: 'Leader chooses worker_provider+worker_model for NEW tasks only; otherwise default', discovery: { tool: 'mentor_status', arguments: { detail: 'models' } }, existingTasks: 'pinned; no self-switch or midtask model changes' }, materials: { discovery: { tool: 'mentor_materials', arguments: { action: 'list' } }, actions: ['list', 'share', 'read'], access: 'Exact Leader-session uploads or contained workspace files; selected tasks or all current/future workers', propagation: 'Next admitted prompt/list/read; no messages, wakeups or read acknowledgements', pdf: { mode: 'bounded text-layer extraction, no OCR', maxInputBytes: 20971520, maxPages: 10, maxCharacters: 12000, parser: 'pdftotext', fullReadOnlySandboxRequired: true, executableProbed: false }, nativeServices: Object.fromEntries(['attachments', 'fs', 'subprocess', 'sandbox'].map(key => [key, !!ctx.get?.(key)])) }, mentor: { modelPolicy: config.requireGptMentor ? 'codex-gpt-only' : 'current-session', provider: config.requireGptMentor ? 'openai-codex' : null, models: mentorModels.map(item => item.id), selectableProviders: providers.map(item => item.id), switchable: true, switchAppliesAt: 'next-request', inferenceTested: false }, liveSessions: (ctx.agents.list?.() ?? []).filter(agent => ctx.agentPresets.composedPreset(agent.ctx) === PRESET).map(agent => ({ sessionId: agent.id, role: agent.session.header.origin === 'subagent' ? 'worker' : 'mentor', ...toolReadiness(agent, ctx.tools), workerRouteReady: worker.ready, workerRouteScope: 'configured-default-only; use mentor_status task_id for assigned route', initializationError: failures.get(agent.id) ?? null, cooperation: cooperation(state(agent)) })), memory: 'Session-log projection; compression cannot erase recorded task facts. Session-scoped, not a cross-project vector database.' };
+    return { version: '0.10.1', backend: chooseBackend(), backendSelection: config.workerBackend ?? 'auto', nativeTeams: { enabled: !!ctx.get?.('agentTeams'), modelOptionsSupported: ctx.get?.('agentTeams')?.supportsAgentOptions === true }, flashCapabilities: { contextWindow: 1000000, maxOutputTokens: 384000, configuredOutputBudget: config.workerMaxTokens }, preset: presets.find(item => item.id === PRESET) ?? null, worker, workerSelection: { defaultModel: config.workerModel, perTask: 'Leader chooses worker_provider+worker_model for NEW tasks only; otherwise default', discovery: { tool: 'mentor_status', arguments: { detail: 'models' } }, existingTasks: 'pinned; no self-switch or midtask model changes' }, materials: { discovery: { tool: 'mentor_materials', arguments: { action: 'list' } }, actions: ['list', 'share', 'read'], access: 'Exact Leader-session uploads or contained workspace files; selected tasks or all current/future workers', propagation: 'Next admitted prompt/list/read; no messages, wakeups or read acknowledgements', pdf: { mode: 'bounded text-layer extraction, no OCR', maxInputBytes: 20971520, maxPages: 10, maxCharacters: 12000, parser: 'pdftotext', fullReadOnlySandboxRequired: true, executableProbed: false }, nativeServices: Object.fromEntries(['attachments', 'fs', 'subprocess', 'sandbox'].map(key => [key, !!ctx.get?.(key)])) }, mentor: { modelPolicy: config.requireGptMentor ? 'codex-gpt-only' : 'current-session', provider: config.requireGptMentor ? 'openai-codex' : null, models: mentorModels.map(item => item.id), selectableProviders: providers.map(item => item.id), switchable: true, switchAppliesAt: 'next-request', inferenceTested: false }, liveSessions: (ctx.agents.list?.() ?? []).filter(agent => ctx.agentPresets.composedPreset(agent.ctx) === PRESET).map(agent => ({ sessionId: agent.id, role: agent.session.header.origin === 'subagent' ? 'worker' : 'mentor', ...toolReadiness(agent, ctx.tools), workerRouteReady: worker.ready, workerRouteScope: 'configured-default-only; use mentor_status task_id for assigned route', initializationError: failures.get(agent.id) ?? null, cooperation: cooperation(state(agent)) })), memory: 'Session-log projection; compression cannot erase recorded task facts. Session-scoped, not a cross-project vector database.' };
   }
   ctx.inject(['cordisInspect'], inner => {
     inner.effect(() => inner.cordisInspect.register({
@@ -502,8 +502,7 @@ export function apply(ctx, config) {
       const own = state(agent);
       if (own.run?.mode !== 'collaborative') throw new Error((own.run?.error || 'Collaboration is not ready; inspect mentor_status and disclose the blocker.') + ' No direct execution or model fallback was authorized.');
       const active = own.tasks.filter(item => !TERMINAL.includes(item.status) || ctx.agents.get(item.childId)?.status === 'running');
-      if (own.run.backend !== 'team' && active.length >= config.maxConcurrentWorkers) throw new Error('Outstanding worker limit reached; guide or review existing workers first');
-      if (own.tasks.length >= 64) throw new Error('Session task ledger is full (64); start a new session');
+      if (own.run.backend !== 'team' && config.maxConcurrentWorkers > 0 && active.length >= config.maxConcurrentWorkers) throw new Error('Configured outstanding worker limit reached; guide or review existing workers first');
       const writeScope = list(args.write_scope, 'write_scope').map(path => {
         const normalized = path.replaceAll('\\', '/').replace(/\/$/, '');
         if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || normalized.split('/').some(part => !part || part === '..' || part === '.') || /[*?\[\]]/.test(normalized)) throw new Error('write_scope requires clean workspace-relative paths');

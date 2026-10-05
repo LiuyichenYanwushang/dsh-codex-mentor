@@ -122,11 +122,55 @@ for (const selectedBackend of ['subagent', 'team']) test(`native ${selectedBacke
   }
 });
 
-async function kernel(installMentor = true) {
+for (const [backend, count] of [['subagent', 9], ['team', 17]]) test(`native ${backend} admits ${count} simultaneous workers using the shipped no-count-quota composition`, { timeout: 15000 }, async () => {
+  const { parse } = await import(runtime.resolve('yaml'));
+  const patches = parse(await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8'), { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: value => ({ __jsExpr: value }) }] });
+  const subagentConfig = patches.find(patch => patch.id === 'subagent').config, teamConfig = patches.find(patch => patch.id === 'agent-team').config;
+  assert.equal(subagentConfig.maxActiveSubagents, Number.MAX_SAFE_INTEGER); assert.equal(subagentConfig.maxDepth, 1);
+  assert.equal(teamConfig.maxMembers, Number.MAX_SAFE_INTEGER); assert.equal(teamConfig.maxTasks, Number.MAX_SAFE_INTEGER);
+  const ctx = await kernel(true, subagentConfig), root = await mkdtemp(join(tmpdir(), 'dsh-mentor-no-count-quota-'));
+  const gate = Promise.withResolvers(), allEntered = Promise.withResolvers(), entered = new Set();
+  try {
+    for (const [name, config] of [['dsh-session-persistence-jsonl', { root: join(root, 'sessions'), compression: 'none' }], ['dsh-session-query-sqlite', { path: ':memory:', openAt: 'never' }], ...(backend === 'team' ? [['dsh-experimental-agent-team', teamConfig], ['dsh-experimental-tool-agent-team', {}]] : [])]) {
+      const mod = await import('@deepseek-ai/' + name); await ctx.plugin(mod.default ?? mod, config);
+    }
+    class HoldingAdapter extends LlmAdapter {
+      async listModels(provider) { return [{ provider, id: 'deepseek-flash', name: 'Local capacity fixture' }]; }
+      async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 1000000 } }; }
+      async *stream(options) {
+        const agent = ctx.agents.get(options.sessionId);
+        if (agent.session.header.origin !== 'subagent') { yield* response(null, 'Capacity fixture settlement, not independent acceptance.'); return; }
+        assert.equal(stateOf(ctx, agent).tasks[0].permissions.shell, 'denied');
+        entered.add(agent.id); if (entered.size === count) allEntered.resolve();
+        await gate.promise; yield* response(null, 'Capacity fixture only; no formal acceptance claimed.');
+      }
+    }
+    ctx.llm.registerAdapter(['deepseek-official'], new HoldingAdapter());
+    const handle = await ctx.agents.create({ sessionId: `no-count-quota-${backend}`, agentOptions: { provider: 'deepseek-official', model: 'deepseek-flash' }, setup: async agentCtx => { await ctx.agentPresets.mount(agentCtx, 'codex-mentor'); } });
+    const execute = (name, args) => ctx.tools.execute({ callId: randomUUID(), name, arguments: args, agent: handle.agent, signal: new AbortController().signal });
+    const begin = await execute('mentor_begin', { mode: 'collaborative', backend, task_kind: 'audit', task: 'Independent readonly capacity fixture' }); assert.equal(begin.isError, false, JSON.stringify(begin));
+    await until(ctx, handle.agent, state => state.tasks.length === count && state.tasks.every(task => task.status === 'stopped'), async () => {
+      for (let i = 0; i < count; i++) {
+        const result = await execute('mentor_delegate', { goal: `Independent capacity fixture ${i}`, write_scope: [], acceptance: 'Readonly capacity only', reasoning_effort: 'default' }); assert.equal(result.isError, false, JSON.stringify(result));
+      }
+      await allEntered.promise;
+      assert.equal(ctx.agents.list().filter(agent => agent.session.header.origin === 'subagent').length, count);
+      assert.equal(stateOf(ctx, handle.agent).tasks.filter(task => !['accepted', 'cancelled', 'closed-unaccepted'].includes(task.status)).length, count);
+      gate.resolve();
+    });
+    await ctx.subagents.drainContinuableDescendants([handle.agent]); await handle.dispose();
+  } finally {
+    gate.resolve(); await ctx.fiber.dispose();
+    assert.equal(dirname(resolve(root)), resolve(tmpdir())); assert.ok(basename(root).startsWith('dsh-mentor-no-count-quota-'));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function kernel(installMentor = true, subagentConfig = {}) {
   const ctx = new Context();
   for (const name of ['cordis-plugin-loader', 'dsh-llm', 'dsh-session', 'dsh-session-projection', 'dsh-system-prompt', 'dsh-tools', 'dsh-agent', 'dsh-agent-loop', 'dsh-agent-preset-registry', 'dsh-subagent', 'dsh-subagent-spawn-in-process']) {
     const mod = await import('@deepseek-ai/' + name);
-    await ctx.plugin(mod.default ?? mod, name === 'dsh-agent-preset-registry' ? { default: 'standard' } : {});
+    await ctx.plugin(mod.default ?? mod, name === 'dsh-agent-preset-registry' ? { default: 'standard' } : name === 'dsh-subagent' ? subagentConfig : {});
   }
   if (installMentor) await ctx.plugin(mentor, {});
   await ctx.agentPresets.register({ id: 'standard', plugins: [] });

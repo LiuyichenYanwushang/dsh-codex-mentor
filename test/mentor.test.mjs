@@ -11,6 +11,19 @@ const { apply, Config } = await import('../index.js');
 const { initial, fold, view, encode, contextText, KEY, PRESET } = await import('../ledger.js');
 const { cooperation } = await import('../experience.js');
 
+test('default staffing has no 8-worker or 64-task quota; optional explicit quotas still validate and apply', async () => {
+  assert.equal(Config().maxConcurrentWorkers, 0); assert.equal(Config({ maxConcurrentWorkers: 9 }).maxConcurrentWorkers, 9);
+  for (const value of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) assert.throws(() => Config({ maxConcurrentWorkers: value }));
+  const h = harness(), mentor = await h.makeAgent('no-count-quota');
+  await h.call(mentor, 'mentor_begin', { mode: 'collaborative', task_kind: 'audit', task: 'Independent staffing fixture' });
+  for (let i = 0; i < 65; i++) await h.call(mentor, 'mentor_delegate', { goal: `Readonly fixture ${i}`, write_scope: [], acceptance: 'Fixture access only' });
+  assert.equal(h.state(mentor).tasks.length, 65); assert.equal(h.agents.size, 66);
+  const compact = JSON.parse(contextText(h.state(mentor)).split('\n')[1]); assert.equal(compact.tasks.length, 8); assert.equal(compact.omittedTasks, 57);
+  const limited = harness({ maxConcurrentWorkers: 1 }), leader = await limited.makeAgent('explicit-quota');
+  await limited.call(leader, 'mentor_delegate', { goal: 'First fixture', write_scope: [], acceptance: 'Fixture only' });
+  await assert.rejects(limited.call(leader, 'mentor_delegate', { goal: 'Second fixture', write_scope: [], acceptance: 'Fixture only' }), /Configured outstanding worker limit/);
+});
+
 test('requeued user input cannot replace the parent run; a genuinely new input archives it', async () => {
   const h = harness(), mentor = await h.makeAgent('parent');
   const input = { id: 'input-1', source: { kind: 'user' }, content: [{ type: 'text', text: 'overview' }] };

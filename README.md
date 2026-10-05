@@ -19,6 +19,14 @@ DSH 0.2.0-rc.2 的独立模式 bundle。非 OpenAI/DeepSeek 官方产品；提�
 
 Flash 默认自动选择已配置且目录中包含 `deepseek-flash`（显示名 DeepSeek-V41-Flash）的 `deepseek-account`，其次 `deepseek-official`。选择发生在派工前，实际路由写入子会话描述和任务记录；推理失败不会自动换成 GPT，也不会切换账户。其他 provider 可以通过 `codex-mentor-host` 配置显式指定。缺凭据时在 Settings → Models 配置；目录可用不是推理成功的证明。
 
+## 0.10.1：取消智能体数量门槛
+
+- 移除原生 continuable 子代理池默认 8 个、导师默认 3 个/配置最大 8 个，以及原生 Teams 默认 16 个成员的数量门槛；删除导师会话累计 64 个任务的硬拒绝，团队任务数量也不再人为封顶。不是把 8 改成 16。
+- 用 bundle 原生配置覆盖人数/任务门槛，不修改 DSH SDK。原生 schema 只接受正整数、没有 unlimited 标记，使用 `Number.MAX_SAFE_INTEGER`（9007199254740991）作为实际无数量配额的配置值，不宣称数学上的无限。导师 `maxConcurrentWorkers` 默认 `0`；如以后明确设为正整数，仍可自选并发预算，配置值不再限于 8。
+- 不启用原本关闭的 Teams，也不恢复任何旧任务。委派深度、写范围冲突、只读权限、消息字节/积压容量、资料读取范围及独立验收不变；概览的一 worker 预算属于特定任务策略，不是通用智能体数量配额。模型上下文仍只展示最近 8 条概要，完整账本保留；这不是只允许 8 个智能体。
+- 数量不再受人为配额限制，仍会消耗内存、API 并发和费用，由 Leader 按实际任务与用户成本约束决定人数。若当前 profile 的更高优先级设置显式指定了正数配额，其值仍有优先级；以重启后的实际设置为准。
+- 97/97 确定性检查通过，0 skipped；原生实际同时保留 9 个 continuable 子代理、17 个 Teams 成员，使用本 bundle 的配置，不调用外部模型。另验证默认可保留 65 个任务、上下文仍只显示 8 个概要，以及主动设定正数预算时仍有效。
+
 ## 0.10.0：共享资料与只读 PDF 文本
 
 上传的 PDF 在 DSH 模型请求中是**文件/路径引用**，不是自动解析的全文；浏览器不能直接给子代理上传文件，本插件不改变这个上传规则。现在 Leader 可以将当前会话资料登记给执行者按需读取，普通 continuable 与原生 Teams 使用同一入口。
@@ -160,7 +168,7 @@ Host `codex-mentor-host`：
 | workerProvider | auto |
 | workerModel | deepseek-flash |
 | workerMaxTokens | 384000 |
-| maxConcurrentWorkers | 3 |
+| maxConcurrentWorkers | 0（不设数量配额） |
 | requireGptMentor | false |
 | workerBackend | auto |
 
