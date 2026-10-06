@@ -19,6 +19,14 @@ DSH 0.2.0-rc.2 的独立模式 bundle。非 OpenAI/DeepSeek 官方产品；提�
 
 Flash 默认自动选择已配置且目录中包含 `deepseek-flash`（显示名 DeepSeek-V41-Flash）的 `deepseek-account`，其次 `deepseek-official`。选择发生在派工前，实际路由写入子会话描述和任务记录；推理失败不会自动换成 GPT，也不会切换账户。其他 provider 可以通过 `codex-mentor-host` 配置显式指定。缺凭据时在 Settings → Models 配置；目录可用不是推理成功的证明。
 
+## 0.10.2：清除 profile 中仍生效的人数覆盖
+
+- 实际 profile 可能覆盖 bundle 默认值：本次检测到子代理 `30`、原生 Teams `8`。仅发布 0.10.1 不能证明这些覆盖已解除。
+- 首次启动通过原生 `configEditor.edit()` 将子代理人数、Teams 人数和任务数更新为 `Number.MAX_SAFE_INTEGER`，原样保留现有委派深度及其他字段，不手改 SDK 或 profile 文件。完成标记由同一原生 API 保存；之后不会反复覆盖用户新设的成本预算。
+- 修改 Teams 普通配置会触发服务生命周期，因此部署后由用户重启；若检测到驻留子代理则拒绝迁移，保持待完成状态，不停止已有执行者。缺少 Teams 不会将其启用。Home/命令行等更高层仍拒绝覆盖时，不标记成功。
+- `CodexMentor.diagnostics` 新增 `countQuotas`，展示加载后的实际 profile 数值与迁移完成标记，而非只展示 schema 默认值。启动回调不阻塞页面，需检查这些数值后才能确认取消限制生效。
+- 新增 3 个迁移回归检查，覆盖 8/30 上层覆盖、保留深度/消息设置、一次性标记、驻留执行者拒绝、关闭的 Teams 及失败不报成功；完整检查 100/100，0 skipped，不调用外部推理。
+
 ## 0.10.1：取消智能体数量门槛
 
 - 移除原生 continuable 子代理池默认 8 个、导师默认 3 个/配置最大 8 个，以及原生 Teams 默认 16 个成员的数量门槛；删除导师会话累计 64 个任务的硬拒绝，团队任务数量也不再人为封顶。不是把 8 改成 16。

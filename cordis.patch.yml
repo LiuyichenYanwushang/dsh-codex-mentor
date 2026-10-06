@@ -13,8 +13,12 @@
     maxMessageBytes: 65536
     disposalTimeoutMs: 5000
 - insert:
+    - id: mentor-count-quota-migration
+      name: './count-quota-migration.js'
+      config:
+        applied: false # One-time native editor migration; preserve future explicit operator changes.
     - id: codex-mentor-host
-      name: './host-0.10.1.js'
+      name: './host-0.10.2.js'
       config:
         workerProvider: auto
         workerModel: deepseek-flash
