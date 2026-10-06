@@ -18,7 +18,7 @@
       config:
         applied: false # One-time native editor migration; preserve future explicit operator changes.
     - id: codex-mentor-host
-      name: './host-0.11.0.js'
+      name: './host-0.11.1.js'
       config:
         workerProvider: auto
         workerModel: deepseek-flash
@@ -28,12 +28,13 @@
         workerBackend: auto # auto | subagent | team; leaders keep the session's model.
     - id: codex-mentor-gui
       name: './gui/index.js'
+      disabled: true # Collaboration is mentor-controlled; no extra manual composer entry.
     - id: preset-codex-mentor
       name: '@deepseek-ai/dsh-agent-preset'
       config:
         id: codex-mentor
         name: Mentor · 导师协作
-        description: 当前会话模型担任 Leader，可中途换模型；默认 Flash，Leader 可逐任务选模型；子代理/原生团队共享资料与只读 PDF 文本，保留独立验收和任务记忆。
+        description: 当前模型担任 Leader，默认 Flash 执行；对代码严格、对人仁慈，批判审查与独立验收；导师自主管理长期记忆、成员复用、通讯和讨论。
         order: 5
         plugins:
           - id: mentor-capability-guard

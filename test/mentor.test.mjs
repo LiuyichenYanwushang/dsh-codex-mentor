@@ -11,6 +11,15 @@ const { apply, Config } = await import('../index.js');
 const { initial, fold, view, encode, contextText, KEY, PRESET } = await import('../ledger.js');
 const { cooperation } = await import('../experience.js');
 
+test('mentor review is critical and compassionate; autonomous collaboration has no default manual entry', async () => {
+  const { MENTOR } = await import('../prompts.js');
+  for (const phrase of ['Linus Benedict Torvalds', 'Strict with code, kind to people', 'root cause', 'boundary/failure cases', 'never demean its author', 'Question your own advice too', 'endless audits']) assert.ok(MENTOR.includes(phrase), phrase);
+  const { readFile } = await import('node:fs/promises');
+  const patch = await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8');
+  assert.match(patch, /id: codex-mentor-gui\s+name: '\.\/gui\/index\.js'\s+disabled: true/);
+  assert.match(patch, /id: codex-mentor-host\s+name: '\.\/host-0\.11\.1\.js'/);
+});
+
 test('default staffing has no 8-worker or 64-task quota; optional explicit quotas still validate and apply', async () => {
   assert.equal(Config().maxConcurrentWorkers, 0); assert.equal(Config({ maxConcurrentWorkers: 9 }).maxConcurrentWorkers, 9);
   for (const value of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) assert.throws(() => Config({ maxConcurrentWorkers: value }));

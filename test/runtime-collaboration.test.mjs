@@ -47,9 +47,22 @@ class Fixture extends LlmAdapter {
       const before = this.ctx.tokenMeter.measure(agent.session, { config, tools: beforeTools }).totalTokens;
       const after = this.ctx.tokenMeter.measure(agent.session, { config, tools: options.tools }).totalTokens;
       this.costs.set(role, { before, after, added: after - before, kind: 'native heuristic; baseline removes four new tools and two delegation fields on the same surface' });
+      if (role === 'leader') {
+        const { MENTOR } = await import('../prompts.js');
+        const rule = MENTOR.split('\n').find(line => line.startsWith('Review like a rigorous Linux maintainer'));
+        const price = messages => messages.reduce((sum, message) => sum + this.ctx.tokenMeter.estimateMessage(message), 0);
+        const baseline = options.messages.map(message => ({ ...message, content: Array.isArray(message.content) ? message.content.map(block => block.type === 'text' ? { ...block, text: block.text.replace(rule, '') } : block) : message.content }));
+        const current = price(options.messages), previous = price(baseline);
+        assert.ok(current > previous && current - previous < 512, 'Bounded critical-review instruction is actually model-visible');
+        console.log('MAINTAINER_FIRST_TURN_PROMPT_COST', JSON.stringify({ before: previous, after: current, added: current - previous, kind: 'native fixed heuristic on the actual first Leader request; only new review paragraph removed for baseline' }));
+      }
     }
     assert.ok(this.calls.length < 150, 'No infinite fixture messaging loop');
-    if (!own.parentId) { yield* output(null, 'Fixture parent observed native event.'); return; }
+    if (!own.parentId) {
+      assert.match(JSON.stringify(options.messages), /Strict with code, kind to people/);
+      assert.match(JSON.stringify(options.messages), /Question your own advice too/);
+      yield* output(null, 'Fixture parent observed native event.'); return;
+    }
     const task = currentAssignment(own);
     assert.equal(options.provider, task.memberRoute.provider); assert.equal(options.model, task.memberRoute.model);
     if (task.status === 'implementing') {
