@@ -18,7 +18,7 @@
       config:
         applied: false # One-time native editor migration; preserve future explicit operator changes.
     - id: codex-mentor-host
-      name: './host-0.11.1.js'
+      name: './host-0.11.2.js'
       config:
         workerProvider: auto
         workerModel: deepseek-flash

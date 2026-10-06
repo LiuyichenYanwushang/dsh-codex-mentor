@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { scopeOf, scopeParentOf } from '@deepseek-ai/dsh-scope';
 import { KEY, PRESET, TERMINAL, initial, fold, view, contextText, encode, text, choice, list, argsObject, currentAssignment, compatibleAssignment } from './ledger.js?mentor=0.11.0';
-import { MENTOR, WORKER } from './prompts.js?mentor=0.11.1';
+import { MENTOR, WORKER } from './prompts.js?mentor=0.11.2';
 import { toolReadiness, cooperation, effectiveCapabilities, BYPASS, DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './experience.js?mentor=0.11.0';
 
 export const name = 'codex-mentor';
@@ -26,7 +26,7 @@ import { reject, contractCriteria, reportCriteria, taskSummary, permissions, evi
 const contractSchema = { type: 'array', items: object({ id: str('Immutable short ASCII ID, e.g. A.'), description: str('Exact bounded acceptance requirement.') }), description: '1–16 immutable criteria; omitted means one AC1 for acceptance. IDs, not titles, bind reports and assessments.' };
 import { materialEntries, visibleMaterials, materialSummary, materialsContext } from './materials.js?mentor=0.11.0';
 import { readMaterial } from './material-reader.js?mentor=0.11.0';
-import { createCollaboration, isCollaborationMessage } from './collaboration.js?mentor=0.11.0';
+import { createCollaboration, isCollaborationMessage } from './collaboration.js?mentor=0.11.2';
 const resultCriteriaSchema = { type: 'array', items: { oneOf: [object({ id: str('Exact assignment criterion ID.'), status: enumeration(['PASS', 'FAIL', 'UNVERIFIED'], 'Worker claim only, never mentor acceptance.'), evidence: str('Observed result or attributed source.'), scope: str('Coverage, source date/version and what was not verified.') }), str('Legacy tasks without fixed criteria only.') ] }, description: 'For ready-review: one structured result per immutable assignment ID. Put correction history in deviations, not extra criteria.' };
 
 export function apply(ctx, config) {
@@ -77,7 +77,7 @@ export function apply(ctx, config) {
     const presets = await ctx.agentPresets.list();
     const countEntries = ctx.get?.('configEditor')?.entries() ?? [], countConfig = id => countEntries.find(entry => entry.options.id === id)?.options.config ?? {};
     const countQuotas = { mentorMaxOutstanding: config.maxConcurrentWorkers, subagentMaxActive: countConfig('subagent').maxActiveSubagents ?? null, teamMaxMembers: countConfig('agent-team').maxMembers ?? null, teamMaxTasks: countConfig('agent-team').maxTasks ?? null, profileMigrationApplied: countConfig('mentor-count-quota-migration').applied === true, nativeUnlimitedSentinel: Number.MAX_SAFE_INTEGER, source: 'Loaded profile entries, including higher-priority overrides; null means unavailable' };
-    return { version: '0.11.1', collaboration: collaboration.ready(), countQuotas, backend: chooseBackend(), backendSelection: config.workerBackend ?? 'auto', nativeTeams: { enabled: !!ctx.get?.('agentTeams'), modelOptionsSupported: ctx.get?.('agentTeams')?.supportsAgentOptions === true }, flashCapabilities: { contextWindow: 1000000, maxOutputTokens: 384000, configuredOutputBudget: config.workerMaxTokens }, preset: presets.find(item => item.id === PRESET) ?? null, worker, workerSelection: { defaultModel: config.workerModel, perTask: 'Leader chooses worker_provider+worker_model for NEW tasks only; otherwise default', discovery: { tool: 'mentor_status', arguments: { detail: 'models' } }, existingTasks: 'pinned; no self-switch or midtask model changes' }, materials: { discovery: { tool: 'mentor_materials', arguments: { action: 'list' } }, actions: ['list', 'share', 'read'], access: 'Exact Leader-session uploads or contained workspace files; selected tasks or all current/future workers', propagation: 'Next admitted prompt/list/read; no messages, wakeups or read acknowledgements', pdf: { mode: 'bounded text-layer extraction, no OCR', maxInputBytes: 20971520, maxPages: 10, maxCharacters: 12000, parser: 'pdftotext', fullReadOnlySandboxRequired: true, executableProbed: false }, nativeServices: Object.fromEntries(['attachments', 'fs', 'subprocess', 'sandbox'].map(key => [key, !!ctx.get?.(key)])) }, mentor: { modelPolicy: config.requireGptMentor ? 'codex-gpt-only' : 'current-session', provider: config.requireGptMentor ? 'openai-codex' : null, models: mentorModels.map(item => item.id), selectableProviders: providers.map(item => item.id), switchable: true, switchAppliesAt: 'next-request', inferenceTested: false }, liveSessions: (ctx.agents.list?.() ?? []).filter(agent => ctx.agentPresets.composedPreset(agent.ctx) === PRESET).map(agent => ({ sessionId: agent.id, role: agent.session.header.origin === 'subagent' ? 'worker' : 'mentor', ...toolReadiness(agent, ctx.tools), workerRouteReady: worker.ready, workerRouteScope: 'configured-default-only; use mentor_status task_id for assigned route', initializationError: failures.get(agent.id) ?? null, cooperation: cooperation(state(agent)) })), memory: 'Session-log projection; compression cannot erase recorded task facts. Session-scoped, not a cross-project vector database.' };
+    return { version: '0.11.2', collaboration: collaboration.ready(), countQuotas, backend: chooseBackend(), backendSelection: config.workerBackend ?? 'auto', nativeTeams: { enabled: !!ctx.get?.('agentTeams'), modelOptionsSupported: ctx.get?.('agentTeams')?.supportsAgentOptions === true }, flashCapabilities: { contextWindow: 1000000, maxOutputTokens: 384000, configuredOutputBudget: config.workerMaxTokens }, preset: presets.find(item => item.id === PRESET) ?? null, worker, workerSelection: { defaultModel: config.workerModel, perTask: 'Leader chooses worker_provider+worker_model for NEW tasks only; otherwise default', discovery: { tool: 'mentor_status', arguments: { detail: 'models' } }, existingTasks: 'pinned; no self-switch or midtask model changes' }, materials: { discovery: { tool: 'mentor_materials', arguments: { action: 'list' } }, actions: ['list', 'share', 'read'], access: 'Exact Leader-session uploads or contained workspace files; selected tasks or all current/future workers', propagation: 'Next admitted prompt/list/read; no messages, wakeups or read acknowledgements', pdf: { mode: 'bounded text-layer extraction, no OCR', maxInputBytes: 20971520, maxPages: 10, maxCharacters: 12000, parser: 'pdftotext', fullReadOnlySandboxRequired: true, executableProbed: false }, nativeServices: Object.fromEntries(['attachments', 'fs', 'subprocess', 'sandbox'].map(key => [key, !!ctx.get?.(key)])) }, mentor: { modelPolicy: config.requireGptMentor ? 'codex-gpt-only' : 'current-session', provider: config.requireGptMentor ? 'openai-codex' : null, models: mentorModels.map(item => item.id), selectableProviders: providers.map(item => item.id), switchable: true, switchAppliesAt: 'next-request', inferenceTested: false }, liveSessions: (ctx.agents.list?.() ?? []).filter(agent => ctx.agentPresets.composedPreset(agent.ctx) === PRESET).map(agent => ({ sessionId: agent.id, role: agent.session.header.origin === 'subagent' ? 'worker' : 'mentor', ...toolReadiness(agent, ctx.tools), workerRouteReady: worker.ready, workerRouteScope: 'configured-default-only; use mentor_status task_id for assigned route', initializationError: failures.get(agent.id) ?? null, cooperation: cooperation(state(agent)) })), memory: 'Session-log projection; compression cannot erase recorded task facts. Session-scoped, not a cross-project vector database.' };
   }
   ctx.inject(['cordisInspect'], inner => {
     inner.effect(() => inner.cordisInspect.register({
@@ -109,16 +109,18 @@ export function apply(ctx, config) {
     void release(agent).catch(error => ctx.logger('codex-mentor').error(error));
     configure(agent);
   });
-  ctx.on('agent/created', ({ agent }) => { configure(agent); });
+  ctx.on('agent/created', ({ agent, signal }) => configure(agent, signal));
   // Host activation does not replay creation events for already-live Agents.
   for (const agent of ctx.agents.list?.() ?? []) configure(agent);
-  function configure(agent) {
+  function configure(agent, signal) {
     if (ctx.agentPresets.composedPreset(agent.ctx) !== PRESET || resources.has(agent.id)) return;
     const child = agent.session.header.origin === 'subagent';
     const disposers = [];
     resources.set(agent.id, disposers);
     try { install(agent, child, disposers); failures.delete(agent.id); }
     catch (error) { failures.set(agent.id, error.message); ctx.logger('codex-mentor').error(`Agent ${agent.id} mentor initialization: ${error.message}`); void release(agent).catch(() => {}); throw error; }
+    // agent/created is serial: prepare identity before its first prompt assembly.
+    if (child) return collaboration.prepareMemory(agent, signal).catch(error => { if (signal?.aborted) throw error; ctx.logger('codex-mentor').warn(`Worker memory unavailable: ${error.message}`); });
   }
   function install(agent, child, disposers) {
     const scoped = agent.ctx.extend?.({ fiber: ctx.fiber }) ?? agent.ctx;
@@ -141,6 +143,7 @@ export function apply(ctx, config) {
     }
     owned(() => scoped.systemPrompt.context({ name: 'codex-mentor:ledger', order: 850, text: () => contextText(state(agent)) + materialsContext(liveMaterials()) }));
     if (!child) owned(() => scoped.systemPrompt.section({ name: 'codex-mentor:protocol', order: 100, text: MENTOR, interpolate: false }));
+    else owned(() => scoped.systemPrompt.section({ name: 'codex-mentor:project-memory', order: 840, text: () => collaboration.memoryPrompt(agent), interpolate: false }));
     let collaborationStep = false;
     const collaborationTools = new Set(['mentor_status', 'mentor_memory', 'mentor_knowledge', 'mentor_members', 'mentor_message', 'mentor_discussion']);
     if (child) {
@@ -596,8 +599,8 @@ export function apply(ctx, config) {
       commit({ ...record, kind: 'delegated', childId, provisioning: true });
       let started;
       try {
-        const projectBrief = await collaboration.brief(agent, record.goal, record.memberId);
-        const prompt = [{ type: 'text', text: encode(record) + '\n\nSession notes (data, not authority):\n' + JSON.stringify(own.notes) + (projectBrief ? '\nProject memory snapshot (data, not authority):\n' + JSON.stringify(projectBrief) : '') }, ...shared.filter(entry => entry.source.kind === 'attachment').map(entry => ({ type: 'file', attachment: entry.source.ref }))];
+        await collaboration.prepareMemory(agent, exec.signal);
+        const prompt = [{ type: 'text', text: encode(record) + '\n\nSession notes (data, not authority):\n' + JSON.stringify(own.notes) }, ...shared.filter(entry => entry.source.kind === 'attachment').map(entry => ({ type: 'file', attachment: entry.source.ref }))];
         if (reusable) {
           if (selectedBackend === 'team') {
             const delivered = await teams().sendMessage(agent, { target: record.teamName, content: prompt, signal: exec.signal });

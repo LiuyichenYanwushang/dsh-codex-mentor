@@ -1,7 +1,7 @@
 {
   "name": "dsh-codex-mentor",
-  "version": "0.11.1",
-  "description": "Mentor long-term collaboration: shared project/member memory, reuse-first durable teammates, native peer messages, bounded seminars and GUI; scoped materials and strict independent acceptance.",
+  "version": "0.11.2",
+  "description": "Mentor-owned collaboration: milestone memory and bounded worker system-prompt knowledge, reusable members, native peer messages and seminars; scoped materials and strict independent acceptance.",
   "private": true,
   "repository": { "type": "git", "url": "https://github.com/LiuyichenYanwushang/dsh-codex-mentor.git" },
   "homepage": "https://github.com/LiuyichenYanwushang/dsh-codex-mentor#readme",

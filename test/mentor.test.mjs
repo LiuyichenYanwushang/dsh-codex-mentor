@@ -17,7 +17,11 @@ test('mentor review is critical and compassionate; autonomous collaboration has 
   const { readFile } = await import('node:fs/promises');
   const patch = await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8');
   assert.match(patch, /id: codex-mentor-gui\s+name: '\.\/gui\/index\.js'\s+disabled: true/);
-  assert.match(patch, /id: codex-mentor-host\s+name: '\.\/host-0\.11\.1\.js'/);
+  assert.match(patch, /id: codex-mentor-host\s+name: '\.\/host-0\.11\.2\.js'/);
+  const { WORKER } = await import('../prompts.js');
+  assert.match(MENTOR, /Record useful discoveries[\s\S]*before compaction, handoff or closing a task/);
+  assert.match(WORKER, /before blocked\/ready-review reports, compaction or handoff/);
+  assert.match(WORKER, /system prompt includes live, bounded shared knowledge and your own member notes/);
 });
 
 test('default staffing has no 8-worker or 64-task quota; optional explicit quotas still validate and apply', async () => {

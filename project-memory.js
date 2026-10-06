@@ -162,15 +162,16 @@ export async function openProjectMemory(storageDomain) {
     });
   }
   return {
-    snapshot(projectId, { query = '', memberId = null, offset = 0, limit = 8 } = {}) {
+    snapshot(projectId, { query = '', memberId = null, scope, offset = 0, limit = 8 } = {}) {
       projectId = parse(identifier, projectId);
       memberId = parse(identifier.nullable(), memberId);
+      scope = parse(z.enum(['project', 'member']).optional(), scope);
       query = parse(text(256), query).trim().toLowerCase();
       offset = parse(z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), offset);
       limit = parse(z.number().int().min(1).max(L.page), limit);
       const p = getProject(projectId);
       // ponytail: linear per-project search; add an index only at measured scale.
-      const memories = (p?.memories ?? []).filter(r => visible(r, memberId) && (!query || `${r.conclusion}\n${r.evidence}\n${r.conditions}`.toLowerCase().includes(query)))
+      const memories = (p?.memories ?? []).filter(r => visible(r, memberId) && (!scope || r.scope === scope) && (!query || `${r.conclusion}\n${r.evidence}\n${r.conditions}`.toLowerCase().includes(query)))
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
       const members = (p?.members ?? []).filter(m => !query || `${m.memberId}\n${m.description}\n${m.expertise.join('\n')}`.toLowerCase().includes(query));
       return {

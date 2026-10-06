@@ -19,6 +19,14 @@ DSH 0.2.0-rc.2 的独立模式 bundle。非 OpenAI/DeepSeek 官方产品；提�
 
 Flash 默认自动选择已配置且目录中包含 `deepseek-flash`（显示名 DeepSeek-V41-Flash）的 `deepseek-account`，其次 `deepseek-official`。选择发生在派工前，实际路由写入子会话描述和任务记录；推理失败不会自动换成 GPT，也不会切换账户。其他 provider 可以通过 `codex-mentor-host` 配置显式指定。缺凭据时在 Settings → Models 配置；目录可用不是推理成功的证明。
 
+## 0.11.2：节点式记忆记录，直接进入 subagent system prompt
+
+- 提醒导师和成员在重要发现、失败方法/根因、决策及审查反馈后及时记录有复用价值的经验，尤其在压缩、交接、阻塞/提交前；先 search/read，再以 CAS revise 更新或纠正，避免重复笔记、逐读打卡、秘密和隐藏推理。没有新经验或记忆不可用时不编造记录、不阻止正常报告。
+- 普通 subagent 与原生 Team 成员均使用动态 **system-prompt section**，不是派工 user prompt 拼接；原生 `agent/created` 串行等待授权项目初始化，首轮即可使用，每次原生 prompt assembly 读取当前长期记录，冷恢复/复用也生效。原生 `system/message` 保存实际系统快照，旧的派工长期快照不再重复注入。
+- 每次默认最多2条项目共享记录与2条该逻辑成员自己的笔记，分别保留各自预算，带来源、版本、验证状态、条件、证据及截断/省略提示；用 `mentor_knowledge` 读取完整/更相关的记录。Leader 与其他成员私有笔记不进入该成员系统提示，不增加额外 UI、轮询、计时器或背景推理。
+- 直接注入不等于升级为系统指令：记忆是被引用的、不可信数据，不授予新任务/权限，也不替代独立验收。假设须检查，invalidated 和旧快照仅供历史参考，使用省略/历史内容前须检索当前记录；forget 后新快照不再包含正文，不抹除原生历史快照。
+- 139/139 回归通过、0 skipped、无外部推理；检查了真实模型请求的 system 角色和原生 system/message、成员隔离、同成员冷复用、成员自行记笔记后紧接的系统更新，以及完整 Host 重启后继承/失效/遗忘。对同一实际首轮消息仅移除记忆 section，原生启发式增量：Team fixture +640、普通 subagent fixture +495、Host 冷恢复 fixture +525 tokens；数据集不同，不是完整旧版本或外部计费对照。
+
 ## 0.11.1：批判而仁慈的导师，自主管理协作
 
 - **对代码严格，对人仁慈**：以严格的 Linux 维护者为技术审查类比，不冒充 Linus Benedict Torvalds。主动质疑修改必要性、根因、正确性、不变量、失败/边界情况、兼容性、安全和维护成本，用证据与有区分力的检查质询“看起来合理”的结论。

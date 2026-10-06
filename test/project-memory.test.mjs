@@ -47,6 +47,17 @@ function stored(f, projectId = leader.projectId) {
     .get(createHash('sha256').update(projectId).digest('hex'));
 }
 
+test('scoped prompt pages stay separate and cannot disclose another member', async t => {
+  const { memory } = await fixture(t);
+  const shared = await memory.mutate(leader, note('Shared fixture note'));
+  const own = await memory.mutate(worker, note('Private fixture note', { scope: 'member' }));
+  await memory.mutate(peer, note('Sibling-private fixture', { scope: 'member' }));
+  const page = scope => memory.snapshot(leader.projectId, { memberId: worker.memberId, scope, limit: 2 });
+  assert.deepEqual(page('project').memories.map(record => record.id), [shared.id]);
+  assert.deepEqual(page('member').memories.map(record => record.id), [own.id]);
+  assert.throws(() => page('anything'), failure('invalid-request'));
+});
+
 // These mount only native storage plugins: no agents, models, projects or credentials.
 test('native storageDomain owns one versioned handle and survives a full JSON-backed Host restart', async t => {
   const f = await fixture(t), memory = f.memory;
