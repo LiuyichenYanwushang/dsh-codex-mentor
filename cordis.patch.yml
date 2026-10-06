@@ -18,7 +18,7 @@
       config:
         applied: false # One-time native editor migration; preserve future explicit operator changes.
     - id: codex-mentor-host
-      name: './host-0.10.2.js'
+      name: './host-0.11.0.js'
       config:
         workerProvider: auto
         workerModel: deepseek-flash
@@ -26,6 +26,8 @@
         maxConcurrentWorkers: 0 # No default count quota; optional positive values limit only the subagent backend.
         requireGptMentor: false
         workerBackend: auto # auto | subagent | team; leaders keep the session's model.
+    - id: codex-mentor-gui
+      name: './gui/index.js'
     - id: preset-codex-mentor
       name: '@deepseek-ai/dsh-agent-preset'
       config:

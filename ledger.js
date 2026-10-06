@@ -1,5 +1,5 @@
-import { reportCriteria, taskSummary, reject } from './protocol.js?mentor=0.10.0';
-import { fileReference, materialEntries, materialSummary } from './materials.js?mentor=0.10.0';
+import { reportCriteria, taskSummary, reject } from './protocol.js?mentor=0.11.0';
+import { fileReference, materialEntries, materialSummary } from './materials.js?mentor=0.11.0';
 export const KEY = 'codexMentor';
 export const PRESET = 'codex-mentor';
 export const PREFIX = 'CODEX_MENTOR/1\n';
@@ -8,6 +8,15 @@ export const DIRECT_QUESTION_ID = 'codex-mentor-direct';
 export const DIRECT_LABEL = '本次直接执行';
 export const INSPECTION_TOOLS = ['read', 'read_image', 'glob', 'grep', 'bash', 'web_search', 'web_fetch'];
 export const TERMINAL = ['accepted', 'cancelled', 'closed-unaccepted'];
+export function currentAssignment(state) {
+  return state.tasks.find(task => task.taskId === state.activeTaskId) ?? state.tasks.at(-1) ?? null;
+}
+export function compatibleAssignment(previous, next) {
+  if (!previous || !next) return false;
+  const a = previous.memberRoute ?? previous.route, b = next.route;
+  const ceiling = previous.memberWriteScope ?? previous.writeScope ?? [];
+  return a?.provider === b?.provider && a?.model === b?.model && (a?.reasoningEffort ?? 'default') === (b?.reasoningEffort ?? 'default') && (a?.maxTokens ?? null) === (b?.maxTokens ?? null) && (next.writeScope ?? []).every(path => ceiling.some(root => path === root || path.startsWith(root + '/')));
+}
 
 export function text(value, name, max = 3000) {
   if (typeof value !== 'string' || !value.trim() || value.length > max) throw new Error(`${name} must be nonempty text, at most ${max} characters`);
@@ -26,7 +35,7 @@ export function argsObject(value, keys) {
   return value;
 }
 export function initial(header, inheritedEventCount = 0) {
-  return { sessionId: header.id, parentId: header.origin === 'subagent' ? header.parentSession ?? null : null, floor: inheritedEventCount, tasks: [], materials: [], uploads: [], checkpoint: '', checkpointSeq: -1, notes: [], pending: {}, run: null, lastCompletedRun: null, lastInputId: null, recentInputIds: [], consent: null, permissionCalls: {}, recentRecordIds: [] };
+  return { sessionId: header.id, parentId: header.origin === 'subagent' ? header.parentSession ?? null : null, floor: inheritedEventCount, tasks: [], activeTaskId: null, peerThreads: {}, materials: [], uploads: [], checkpoint: '', checkpointSeq: -1, notes: [], pending: {}, run: null, lastCompletedRun: null, lastInputId: null, recentInputIds: [], consent: null, permissionCalls: {}, recentRecordIds: [] };
 }
 export function encode(record) {
   const json = JSON.stringify({ version: 1, ...record });
@@ -82,6 +91,12 @@ function update(state, record, seq) {
     return { ...state, lastCompletedRun: state.run && state.run.runId !== record.runId ? state.run : state.lastCompletedRun, run: { ...record, preliminaryCalls: 0 } };
   }
   // Records are produced by validated tools or authenticated adjacent-Agent messages.
+  if (record.kind === 'peer-message') {
+    if (state.parentId || typeof record.threadId !== 'string' || record.threadId === '__proto__') return state;
+    const previous = Object.hasOwn(state.peerThreads ?? {}, record.threadId) ? state.peerThreads[record.threadId] : 0;
+    const threads = { ...(state.peerThreads ?? {}), [record.threadId]: previous + 1 };
+    return { ...state, peerThreads: threads };
+  }
   if (record.kind === 'memory') {
     if (typeof record.checkpoint === 'string') return { ...state, checkpoint: record.checkpoint, checkpointSeq: seq };
     const notes = state.notes.filter(note => note.id !== record.id);
@@ -119,7 +134,7 @@ function update(state, record, seq) {
   }
   const tasks = [...state.tasks];
   if (index < 0) tasks.push(task); else tasks[index] = task;
-  return { ...state, tasks };
+  return { ...state, tasks, ...(state.parentId && record.kind === 'assignment' ? { activeTaskId: task.taskId } : {}) };
 }
 export function fold(state, event) {
   if (event.seq < state.floor) return state;
@@ -172,7 +187,7 @@ export function fold(state, event) {
     if (message.id && fresh) state = { ...state, lastInputId: message.id, recentInputIds: [...state.recentInputIds, message.id] };
   }
   if (!state.parentId && message.source?.kind === 'subagent-settled') {
-    const task = state.tasks.find(item => item.childId === message.source.senderSessionId);
+    const task = state.tasks.filter(item => item.childId === message.source.senderSessionId).at(-1);
     if (!task || (message.id && (task.handledSettlements?.includes(message.id) || task.lastStop?.nativeMessageId === message.id))) return state;
     const successful = message.source.summary === `Background subagent ${task.childId} finished and will do no further work unless you send it more.`;
     if (successful && task.awaitingSettlements?.length) {
@@ -187,7 +202,14 @@ export function fold(state, event) {
   const source = message.source;
   const sender = source?.kind === 'agent-message' && source.form === 'relay' ? source.senderSessionId : source?.kind === 'team-message' && source.teamId === (state.parentId ?? state.sessionId) ? source.senderId : null;
   if (sender) {
-    if (state.parentId && sender === state.parentId && ['guidance', 'review'].includes(record.kind)) return update(state, record, event.seq);
+    if (state.parentId && sender === state.parentId) {
+      if (record.kind === 'assignment') {
+        const previous = currentAssignment(state);
+        if (record.parentId !== state.parentId || record.childId !== state.sessionId || state.tasks.some(task => task.taskId === record.taskId) || (previous && (!TERMINAL.includes(previous.status) || !compatibleAssignment(previous, record)))) return state;
+        return update(state, record, event.seq);
+      }
+      if (['guidance', 'review'].includes(record.kind)) return update(state, record, event.seq);
+    }
     const task = state.tasks.find(task => task.taskId === record.taskId && task.childId === sender);
     if (!state.parentId && task && record.kind === 'report') return update(state, { ...record, childId: sender }, event.seq);
   }
@@ -196,7 +218,7 @@ export function fold(state, event) {
   return state;
 }
 export function view(state) {
-  return { sessionId: state.sessionId, role: state.parentId ? 'worker' : 'mentor', run: state.run, activeRun: state.run, lastCompletedRun: state.lastCompletedRun, directAuthorized: !!state.consent, checkpoint: state.checkpoint, tasks: state.tasks, activeTasks: state.tasks.filter(task => !TERMINAL.includes(task.status)), recentTaskSummaries: state.tasks.slice(-8).map(task => ({ taskId: task.taskId, runId: task.runId, childId: task.childId, goal: task.goal?.slice(0, 200), status: task.status, registeredChecks: task.verifications?.length ?? 0 })), notes: state.notes, materials: (state.materials ?? []).map(materialSummary) };
+  return { sessionId: state.sessionId, role: state.parentId ? 'worker' : 'mentor', run: state.run, activeRun: state.run, lastCompletedRun: state.lastCompletedRun, directAuthorized: !!state.consent, activeTaskId: state.activeTaskId ?? null, checkpoint: state.checkpoint, tasks: state.tasks, activeTasks: state.tasks.filter(task => !TERMINAL.includes(task.status)), recentTaskSummaries: state.tasks.slice(-8).map(task => ({ taskId: task.taskId, runId: task.runId, childId: task.childId, goal: task.goal?.slice(0, 200), status: task.status, registeredChecks: task.verifications?.length ?? 0 })), notes: state.notes, materials: (state.materials ?? []).map(materialSummary) };
 }
 export function contextText(state) {
   const outstanding = state.tasks.filter(task => !TERMINAL.includes(task.status));

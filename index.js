@@ -4,9 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { scopeOf, scopeParentOf } from '@deepseek-ai/dsh-scope';
-import { KEY, PRESET, TERMINAL, initial, fold, view, contextText, encode, text, choice, list, argsObject } from './ledger.js?mentor=0.10.2';
-import { MENTOR, WORKER } from './prompts.js?mentor=0.10.2';
-import { toolReadiness, cooperation, effectiveCapabilities, BYPASS, DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './experience.js?mentor=0.10.2';
+import { KEY, PRESET, TERMINAL, initial, fold, view, contextText, encode, text, choice, list, argsObject, currentAssignment, compatibleAssignment } from './ledger.js?mentor=0.11.0';
+import { MENTOR, WORKER } from './prompts.js?mentor=0.11.0';
+import { toolReadiness, cooperation, effectiveCapabilities, BYPASS, DIRECT_QUESTION_ID, DIRECT_LABEL, INSPECTION_TOOLS } from './experience.js?mentor=0.11.0';
 
 export const name = 'codex-mentor';
 export const inject = ['tools', 'systemPrompt', 'sessionProjections', 'subagents', 'agents', 'agentPresets', 'llm'];
@@ -22,16 +22,17 @@ const str = description => ({ type: 'string', description });
 const enumeration = (values, description) => ({ type: 'string', enum: values, description });
 const strings = description => ({ type: 'array', items: { type: 'string' }, description });
 const object = (properties, required = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false });
-import { reject, contractCriteria, reportCriteria, taskSummary, permissions, evidenceReuse } from './protocol.js?mentor=0.10.2';
+import { reject, contractCriteria, reportCriteria, taskSummary, permissions, evidenceReuse } from './protocol.js?mentor=0.11.0';
 const contractSchema = { type: 'array', items: object({ id: str('Immutable short ASCII ID, e.g. A.'), description: str('Exact bounded acceptance requirement.') }), description: '1–16 immutable criteria; omitted means one AC1 for acceptance. IDs, not titles, bind reports and assessments.' };
-import { materialEntries, visibleMaterials, materialSummary, materialsContext } from './materials.js?mentor=0.10.2';
-import { readMaterial } from './material-reader.js?mentor=0.10.2';
+import { materialEntries, visibleMaterials, materialSummary, materialsContext } from './materials.js?mentor=0.11.0';
+import { readMaterial } from './material-reader.js?mentor=0.11.0';
+import { createCollaboration, isCollaborationMessage } from './collaboration.js?mentor=0.11.0';
 const resultCriteriaSchema = { type: 'array', items: { oneOf: [object({ id: str('Exact assignment criterion ID.'), status: enumeration(['PASS', 'FAIL', 'UNVERIFIED'], 'Worker claim only, never mentor acceptance.'), evidence: str('Observed result or attributed source.'), scope: str('Coverage, source date/version and what was not verified.') }), str('Legacy tasks without fixed criteria only.') ] }, description: 'For ready-review: one structured result per immutable assignment ID. Put correction history in deviations, not extra criteria.' };
 
 export function apply(ctx, config) {
   ctx.sessionProjections.register({
-    key: KEY, stateVersion: 7,
-    stateSchema: stateZ.object({ sessionId: stateZ.string(), parentId: stateZ.string().nullable(), floor: stateZ.number().int().nonnegative(), tasks: stateZ.array(stateZ.any()), materials: stateZ.array(stateZ.any()).default([]), uploads: stateZ.array(stateZ.any()).default([]), checkpoint: stateZ.string(), checkpointSeq: stateZ.number().int().default(-1), notes: stateZ.array(stateZ.any()), pending: stateZ.record(stateZ.string(), stateZ.string()), run: stateZ.any().nullable(), lastCompletedRun: stateZ.any().nullable(), lastInputId: stateZ.string().nullable(), recentInputIds: stateZ.array(stateZ.string()), consent: stateZ.any().nullable(), permissionCalls: stateZ.record(stateZ.string(), stateZ.boolean()), recentRecordIds: stateZ.array(stateZ.string()) }),
+    key: KEY, stateVersion: 9,
+    stateSchema: stateZ.object({ sessionId: stateZ.string(), parentId: stateZ.string().nullable(), floor: stateZ.number().int().nonnegative(), tasks: stateZ.array(stateZ.any()), activeTaskId: stateZ.string().nullable().default(null), peerThreads: stateZ.record(stateZ.string(), stateZ.number().int().nonnegative()).default({}), materials: stateZ.array(stateZ.any()).default([]), uploads: stateZ.array(stateZ.any()).default([]), checkpoint: stateZ.string(), checkpointSeq: stateZ.number().int().default(-1), notes: stateZ.array(stateZ.any()), pending: stateZ.record(stateZ.string(), stateZ.string()), run: stateZ.any().nullable(), lastCompletedRun: stateZ.any().nullable(), lastInputId: stateZ.string().nullable(), recentInputIds: stateZ.array(stateZ.string()), consent: stateZ.any().nullable(), permissionCalls: stateZ.record(stateZ.string(), stateZ.boolean()), recentRecordIds: stateZ.array(stateZ.string()) }),
     init: initial, apply: fold
   });
   function state(agent) {
@@ -39,6 +40,7 @@ export function apply(ctx, config) {
     if (!result) throw new Error('Codex Mentor task memory is unavailable');
     return result;
   }
+  const collaboration = createCollaboration(ctx, state);
   async function routes(signal, selection = {}) {
     const explicit = selection.worker_provider !== undefined || selection.worker_model !== undefined;
     if (explicit && (selection.worker_provider === undefined || selection.worker_model === undefined)) reject('WORKER_ROUTE_PAIR_REQUIRED', 'A per-task model override needs both provider and model', 'Use mentor_status detail=models to discover exact IDs, then set worker_provider and worker_model together');
@@ -75,7 +77,7 @@ export function apply(ctx, config) {
     const presets = await ctx.agentPresets.list();
     const countEntries = ctx.get?.('configEditor')?.entries() ?? [], countConfig = id => countEntries.find(entry => entry.options.id === id)?.options.config ?? {};
     const countQuotas = { mentorMaxOutstanding: config.maxConcurrentWorkers, subagentMaxActive: countConfig('subagent').maxActiveSubagents ?? null, teamMaxMembers: countConfig('agent-team').maxMembers ?? null, teamMaxTasks: countConfig('agent-team').maxTasks ?? null, profileMigrationApplied: countConfig('mentor-count-quota-migration').applied === true, nativeUnlimitedSentinel: Number.MAX_SAFE_INTEGER, source: 'Loaded profile entries, including higher-priority overrides; null means unavailable' };
-    return { version: '0.10.2', countQuotas, backend: chooseBackend(), backendSelection: config.workerBackend ?? 'auto', nativeTeams: { enabled: !!ctx.get?.('agentTeams'), modelOptionsSupported: ctx.get?.('agentTeams')?.supportsAgentOptions === true }, flashCapabilities: { contextWindow: 1000000, maxOutputTokens: 384000, configuredOutputBudget: config.workerMaxTokens }, preset: presets.find(item => item.id === PRESET) ?? null, worker, workerSelection: { defaultModel: config.workerModel, perTask: 'Leader chooses worker_provider+worker_model for NEW tasks only; otherwise default', discovery: { tool: 'mentor_status', arguments: { detail: 'models' } }, existingTasks: 'pinned; no self-switch or midtask model changes' }, materials: { discovery: { tool: 'mentor_materials', arguments: { action: 'list' } }, actions: ['list', 'share', 'read'], access: 'Exact Leader-session uploads or contained workspace files; selected tasks or all current/future workers', propagation: 'Next admitted prompt/list/read; no messages, wakeups or read acknowledgements', pdf: { mode: 'bounded text-layer extraction, no OCR', maxInputBytes: 20971520, maxPages: 10, maxCharacters: 12000, parser: 'pdftotext', fullReadOnlySandboxRequired: true, executableProbed: false }, nativeServices: Object.fromEntries(['attachments', 'fs', 'subprocess', 'sandbox'].map(key => [key, !!ctx.get?.(key)])) }, mentor: { modelPolicy: config.requireGptMentor ? 'codex-gpt-only' : 'current-session', provider: config.requireGptMentor ? 'openai-codex' : null, models: mentorModels.map(item => item.id), selectableProviders: providers.map(item => item.id), switchable: true, switchAppliesAt: 'next-request', inferenceTested: false }, liveSessions: (ctx.agents.list?.() ?? []).filter(agent => ctx.agentPresets.composedPreset(agent.ctx) === PRESET).map(agent => ({ sessionId: agent.id, role: agent.session.header.origin === 'subagent' ? 'worker' : 'mentor', ...toolReadiness(agent, ctx.tools), workerRouteReady: worker.ready, workerRouteScope: 'configured-default-only; use mentor_status task_id for assigned route', initializationError: failures.get(agent.id) ?? null, cooperation: cooperation(state(agent)) })), memory: 'Session-log projection; compression cannot erase recorded task facts. Session-scoped, not a cross-project vector database.' };
+    return { version: '0.11.0', collaboration: collaboration.ready(), countQuotas, backend: chooseBackend(), backendSelection: config.workerBackend ?? 'auto', nativeTeams: { enabled: !!ctx.get?.('agentTeams'), modelOptionsSupported: ctx.get?.('agentTeams')?.supportsAgentOptions === true }, flashCapabilities: { contextWindow: 1000000, maxOutputTokens: 384000, configuredOutputBudget: config.workerMaxTokens }, preset: presets.find(item => item.id === PRESET) ?? null, worker, workerSelection: { defaultModel: config.workerModel, perTask: 'Leader chooses worker_provider+worker_model for NEW tasks only; otherwise default', discovery: { tool: 'mentor_status', arguments: { detail: 'models' } }, existingTasks: 'pinned; no self-switch or midtask model changes' }, materials: { discovery: { tool: 'mentor_materials', arguments: { action: 'list' } }, actions: ['list', 'share', 'read'], access: 'Exact Leader-session uploads or contained workspace files; selected tasks or all current/future workers', propagation: 'Next admitted prompt/list/read; no messages, wakeups or read acknowledgements', pdf: { mode: 'bounded text-layer extraction, no OCR', maxInputBytes: 20971520, maxPages: 10, maxCharacters: 12000, parser: 'pdftotext', fullReadOnlySandboxRequired: true, executableProbed: false }, nativeServices: Object.fromEntries(['attachments', 'fs', 'subprocess', 'sandbox'].map(key => [key, !!ctx.get?.(key)])) }, mentor: { modelPolicy: config.requireGptMentor ? 'codex-gpt-only' : 'current-session', provider: config.requireGptMentor ? 'openai-codex' : null, models: mentorModels.map(item => item.id), selectableProviders: providers.map(item => item.id), switchable: true, switchAppliesAt: 'next-request', inferenceTested: false }, liveSessions: (ctx.agents.list?.() ?? []).filter(agent => ctx.agentPresets.composedPreset(agent.ctx) === PRESET).map(agent => ({ sessionId: agent.id, role: agent.session.header.origin === 'subagent' ? 'worker' : 'mentor', ...toolReadiness(agent, ctx.tools), workerRouteReady: worker.ready, workerRouteScope: 'configured-default-only; use mentor_status task_id for assigned route', initializationError: failures.get(agent.id) ?? null, cooperation: cooperation(state(agent)) })), memory: 'Session-log projection; compression cannot erase recorded task facts. Session-scoped, not a cross-project vector database.' };
   }
   ctx.inject(['cordisInspect'], inner => {
     inner.effect(() => inner.cordisInspect.register({
@@ -124,39 +126,54 @@ export function apply(ctx, config) {
     function liveMaterials() {
       const own = state(agent), parent = child ? ctx.agents.get(own.parentId) : null;
       const entries = parent ? state(parent).materials : own.materials;
-      return child ? visibleMaterials(entries, own.tasks[0]?.taskId) : entries ?? [];
+      return child ? visibleMaterials(entries, currentAssignment(own)?.taskId) : entries ?? [];
     }
     async function availableMaterials(signal) {
       const own = state(agent);
       if (!child || ctx.agents.get(own.parentId)) return { entries: liveMaterials(), freshness: 'live-registry' };
       const query = ctx.get?.('sessionQuery');
-      if (!query) return { entries: visibleMaterials(own.materials, own.tasks[0]?.taskId), freshness: 'assignment-snapshot-only' };
+      if (!query) return { entries: visibleMaterials(own.materials, currentAssignment(own)?.taskId), freshness: 'assignment-snapshot-only' };
       const lease = await query.observeSession(own.parentId, { signal, projectionMode: 'none' });
       try {
         const root = lease.events.reduce(fold, initial(lease.header, lease.inheritedEventCount));
-        return { entries: visibleMaterials(root.materials, own.tasks[0]?.taskId), freshness: 'parent-log-observation' };
+        return { entries: visibleMaterials(root.materials, currentAssignment(own)?.taskId), freshness: 'parent-log-observation' };
       } finally { lease[Symbol.dispose](); }
     }
     owned(() => scoped.systemPrompt.context({ name: 'codex-mentor:ledger', order: 850, text: () => contextText(state(agent)) + materialsContext(liveMaterials()) }));
     if (!child) owned(() => scoped.systemPrompt.section({ name: 'codex-mentor:protocol', order: 100, text: MENTOR, interpolate: false }));
+    let collaborationStep = false;
+    const collaborationTools = new Set(['mentor_status', 'mentor_memory', 'mentor_knowledge', 'mentor_members', 'mentor_message', 'mentor_discussion']);
     if (child) {
-      const readonlyTools = new Set(['read', 'read_image', 'glob', 'grep', 'web_search', 'web_fetch', 'skill', 'cordis_inspect_list', 'cordis_inspect_query', 'mentor_report', 'mentor_status', 'mentor_memory', 'mentor_materials', 'send_message', 'list_agents', 'ask_user_question', 'todo_write']);
+      const readonlyTools = new Set(['read', 'read_image', 'glob', 'grep', 'web_search', 'web_fetch', 'skill', 'cordis_inspect_list', 'cordis_inspect_query', 'mentor_report', 'mentor_status', 'mentor_memory', 'mentor_knowledge', 'mentor_members', 'mentor_message', 'mentor_discussion', 'mentor_materials', 'send_message', 'list_agents', 'ask_user_question', 'todo_write']);
       owned(() => scoped.tools.guard(execution => {
-        const assignment = state(agent).tasks[0];
+        const assignment = currentAssignment(state(agent));
         if (!assignment) return execution.name === 'mentor_status' ? undefined : 'Assignment not yet admitted; recover it with mentor_status';
-        if (TERMINAL.includes(assignment.status) && execution.name !== 'mentor_status') return 'This assignment is closed';
-        if (['blocked', 'ready-review'].includes(assignment.status) && !['mentor_status', 'mentor_memory'].includes(execution.name)) return 'Awaiting tutor guidance or review; a local ledger notice does not authorize more work.';
+        if (collaborationStep && (!readonlyTools.has(execution.name) || execution.name === 'mentor_report')) return 'Discussion/peer activity is read-only; no mutation, shell, task controls or new work';
+        if (TERMINAL.includes(assignment.status) && !collaborationTools.has(execution.name) && !(collaborationStep && readonlyTools.has(execution.name))) return 'This assignment is closed';
+        if (['blocked', 'ready-review'].includes(assignment.status) && !collaborationTools.has(execution.name) && !(collaborationStep && readonlyTools.has(execution.name))) return 'Awaiting tutor guidance or review; a local ledger notice does not authorize more work.';
         if (!assignment.writeScope.length && !readonlyTools.has(execution.name) && !(assignment.backend === 'team' && ['team_task_get', 'team_task_list', 'team_task_update', 'wait_agent', 'list_agents', 'send_message'].includes(execution.name))) return 'Read-only assignment: mutation and shell tools are disabled';
       }));
       owned(() => scoped.on('agent/pre-step', async (_payload, next) => {
         const decision = await next();
         if (decision.kind === 'reject') return decision;
-        if (state(agent).tasks.some(item => [...TERMINAL, 'blocked', 'ready-review'].includes(item.status))) return { kind: 'enter', messages: [] };
-        return { ...decision, messages: decision.messages.filter(message => message.source?.kind !== 'codex-mentor-ledger') };
+        const incoming = decision.messages.filter(message => message.source?.kind !== 'codex-mentor-ledger');
+        const assignment = currentAssignment(state(agent));
+        const paused = assignment && [...TERMINAL, 'blocked', 'ready-review'].includes(assignment.status);
+        const formal = incoming.some(message => message.source?.kind === 'user' || ((message.source?.senderId ?? message.source?.senderSessionId) === agent.session.header.parentSession && message.content?.some(block => block.type === 'text' && block.text.includes('CODEX_MENTOR/1\n') && /"kind":"(?:assignment|guidance)"/.test(block.text))));
+        if (formal || !paused) collaborationStep = false;
+        else if (incoming.some(isCollaborationMessage)) collaborationStep = true;
+        if (paused && !incoming.some(isCollaborationMessage) && !collaborationStep) {
+          // Native Teams acknowledges durable user/message or still-pending inbox, not a claimed/dropped control.
+          // Preserve transport receipt while avoiding another model call for closed review acknowledgements.
+          const logged = agent.session.snapshotEvents?.() ?? [];
+          for (const message of incoming) if (message.source?.kind === 'team-message' && message.source.teamId === agent.session.header.parentSession && !logged.some(event => event.type === 'user/message' && event.data.id === message.id)) agent.session.append?.('user/message', message, { surfaceOp: 'append' });
+          return { ...decision, kind: 'enter', messages: [] };
+        }
+        return { ...decision, messages: incoming };
       }));
       owned(() => scoped.on('agent/request', async (_payload, next) => {
         const selected = await next();
-        const route = state(agent).tasks[0]?.route;
+        const route = currentAssignment(state(agent))?.memberRoute ?? currentAssignment(state(agent))?.route;
         if (route && (selected.provider !== route.provider || selected.model !== route.model)) throw new Error('This worker is pinned to its recorded assignment route; changing its model is not allowed.');
         // Continuable descriptors omit maxTokens; restore the journal's budget on every call/recovery.
         return route?.maxTokens === undefined ? selected : { ...selected, maxTokens: route.maxTokens };
@@ -166,7 +183,7 @@ export function apply(ctx, config) {
       const redundant = message => {
         const source = message.source;
         if (source?.kind !== 'subagent-settled') return false;
-        const assignment = state(agent).tasks.find(item => item.childId === source.senderSessionId);
+        const assignment = state(agent).tasks.filter(item => item.childId === source.senderSessionId).at(-1);
         return assignment && (assignment.handledSettlements?.includes(message.id) || [...TERMINAL, 'blocked', 'ready-review', 'acceptance_blocked'].includes(assignment.status)) && source.summary === `Background subagent ${source.senderSessionId} finished and will do no further work unless you send it more.`;
       };
       const decision = await next();
@@ -174,7 +191,7 @@ export function apply(ctx, config) {
       if (payload.messages?.length && payload.messages.every(redundant)) return { kind: 'enter', messages: [] };
       return { ...decision, messages: decision.messages.filter(message => message.source?.kind !== 'codex-mentor-ledger' && !redundant(message)).map(message => {
         const source = message.source;
-        const assignment = source?.kind === 'subagent-settled' && state(agent).tasks.find(item => item.childId === source.senderSessionId);
+        const assignment = source?.kind === 'subagent-settled' && state(agent).tasks.filter(item => item.childId === source.senderSessionId).at(-1);
         const submitted = assignment?.report?.evidenceGate ? assignment.report : assignment?.lastSubmittedReport;
         if (submitted || assignment?.status === 'cancelled') return { ...message, content: [{ type: 'text', text: `Worker ${assignment.childId}: report ${submitted?.id ?? 'none'} ${submitted ? 'was SUBMITTED' : 'was not submitted'}; latest update=${assignment.report?.status ?? 'none'}, mentor acceptance/lifecycle=${assignment.status}. Native notice does not erase delivered reports or imply project failure: ${source.summary}${assignment.status === 'stopped' ? `; fresh/reworked work remains incomplete, manual same-session resume is mentor_resume({task_id:"${assignment.taskId}"})` : ''}` }] };
         if (assignment?.status !== 'stopped') return message;
@@ -192,6 +209,7 @@ export function apply(ctx, config) {
     const inheritedScope = scopeParentOf(scopeOf(agent.ctx));
     const deny = bypass.filter(tool => ctx.tools.get(tool, inheritedScope));
     if (deny.length) owned(() => scoped.tools.restrict({ deny }));
+    owned(() => scoped.tools.guard(execution => execution.name === 'send_message' ? 'Use mentor_message for scoped, bounded peer communication; tutor delivery uses native service calls' : undefined));
     owned(() => scoped.tools.guard(execution => bypass.includes(execution.name) || (teamControls.has(execution.name) && backend() !== 'team') ? 'Use mentor_delegate for assigned-model members; alternate delegation is disabled in this mode' : undefined));
     if (!child) owned(() => scoped.tools.guard(execution => {
       if (execution.name.startsWith('mentor_') || ['ask_user_question', 'skill', 'todo_write'].includes(execution.name)) return;
@@ -244,7 +262,7 @@ export function apply(ctx, config) {
     function backend() {
       const own = state(agent);
       if (own.run) return own.run.backend ?? 'subagent';
-      if (child && own.tasks[0]) return own.tasks[0].backend ?? 'subagent';
+      if (child && currentAssignment(own)) return currentAssignment(own).backend ?? 'subagent';
       return chooseBackend();
     }
     function teams() {
@@ -256,7 +274,7 @@ export function apply(ctx, config) {
     async function send(target, record, signal) {
       record.id ??= randomUUID();
       let messageId;
-      const assignment = target === agent.session.header.parentSession ? state(agent).tasks[0] : state(agent).tasks.find(item => item.childId === target);
+      const assignment = target === agent.session.header.parentSession ? currentAssignment(state(agent)) : state(agent).tasks.filter(item => item.childId === target).at(-1);
       if (assignment?.backend === 'team') {
         const recipient = target === agent.session.header.parentSession ? 'lead' : assignment.teamName;
         if (!recipient) throw new Error('No native Team member is linked to this assignment');
@@ -395,6 +413,36 @@ export function apply(ctx, config) {
       commit(record);
       return { record, materials: selected.map(materialSummary), target, visibleToTaskIds: currentRecipients.map(item => item.taskId), futureWorkers: selected.some(entry => entry.all), effect: 'Access registered atomically. Existing workers see it on their next request/list/read; no messages, wakeups or read acknowledgements are claimed.', acceptance: 'unchanged' };
     });
+    tool('mentor_knowledge', 'Search/read durable project knowledge or maintain a shared observation or your member notes. Verified facts require evidence and Leader approval; forgetting does not erase conversation logs.', object({
+      action: enumeration(['list', 'search', 'read', 'note', 'revise', 'confirm', 'invalidate', 'forget'], 'Operation; modifications require the current revision.'),
+      id: str('Memory ID from list/search.'), expected_revision: { type: 'integer', minimum: 1, description: 'Required for revise/confirm/invalidate/forget; stale updates are rejected.' },
+      scope: enumeration(['project', 'member'], 'For note: project shared, or member notes; default project.'), memberId: str('For member note: your logical ID; Leader can select another member.'),
+      conclusion: str('Memory content, at most 12000 characters.'), evidence: str('Source or observed check, at most 12000 characters; required to verify.'), conditions: str('Applicability/invalidation conditions, at most 4000 characters.'), status: enumeration(['hypothesis', 'verified', 'invalidated'], 'Default hypothesis; workers cannot verify.'),
+      query: str('For search: keyword query, at most 200 characters.'), offset: { type: 'integer', minimum: 0, description: 'List/search page offset, default 0; eight previews per page.' }, operationId: str('Optional stable retry ID; not new authority.')
+    }, ['action']), (args, exec) => collaboration.memory(agent, args, exec.signal));
+    tool('mentor_members', 'List logical member profiles and exact current native incarnations before staffing. Inactive is not completion; across new Leader chats profiles survive but old children cannot transfer.', object({ memberId: str('Optional logical member ID for its full profile.'), offset: { type: 'integer', minimum: 0, description: 'Default 0; eight member profiles per page.' } }, []), async args => {
+      const profiles = await collaboration.members(agent);
+      if (args.memberId) return { member: profiles.find(profile => profile.id === args.memberId) ?? null };
+      const offset = args.offset ?? 0;
+      if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('offset must be nonnegative');
+      return { members: profiles.slice(offset, offset + 8), total: profiles.length, nextOffset: offset + 8 < profiles.length ? offset + 8 : null, reuse: 'mentor_delegate prefers compatible idle members; requires a new immutable task' };
+    });
+    tool('mentor_message', 'Send a scoped peer message directly to another current native Team member. Sending can wake it and incur cost; delivery is not reading/progress or permission to reopen work.', object({ target: str('Exact other native member name from mentor_members or list_agents.'), text: str('At most 2000 characters.'), kind: enumeration(['help', 'finding', 'question', 'review', 'reply'], 'Default help; replies should not trigger acknowledgements.'), thread_id: str('Optional existing conversation thread.'), reply_to: str('Optional native message ID.'), task_id: str('Optional task reference, not a new assignment.') }, ['target', 'text']), async (args, exec) => {
+      const result = await collaboration.message(agent, args, exec.signal);
+      if (child && (collaborationStep || TERMINAL.includes(currentAssignment(state(agent))?.status))) exec.concludeTurn();
+      return result;
+    });
+    tool('mentor_discussion', 'Run a bounded read-only seminar among existing idle native teammates. Initial statements are independent; only Leader advances/closes. Consensus never accepts work or verifies memory.', object({
+      action: enumeration(['create', 'list', 'read', 'post', 'advance', 'close'], 'Operation; create/advance/close are Leader-only.'), id: str('Discussion ID.'), expected_revision: { type: 'integer', minimum: 1, description: 'Current room revision for post/advance/close.' },
+      topic: str('For create: question and desired result, at most 1000 characters.'), participants: strings('For create: 1–16 existing idle native member names; does not create members.'), maxRounds: { type: 'integer', minimum: 1, maximum: 8, description: 'For create: default 2; bounded discussion budget, not agent quota.' },
+      round: { type: 'integer', minimum: 1, maximum: 8, description: 'For post: current round; omitted means latest round, guarded by revision.' }, text: str('One statement per participant per round, at most 2000 characters.'),
+      skip_missing: { type: 'boolean', description: 'For advance: explicitly skip missing responses; reason required.' }, reason: str('Reason for skipping, at most 500 characters.'), conclusion: str('For close: bounded conclusion, at most 2000 characters.'), dissent: strings('For close: preserved unresolved disagreements, at most 8.'), nextSteps: strings('For close: proposed next steps, not authorization, at most 8.'),
+      offset: { type: 'integer', minimum: 0, description: 'List or post-history page offset, default 0; eight records per page.' }, operation_id: str('Optional stable mutation retry ID.')
+    }, ['action']), async (args, exec) => {
+      const result = await collaboration.discussion(agent, args, exec.signal);
+      if (child && args.action === 'post') exec.concludeTurn();
+      return result;
+    });
     tool('mentor_memory', 'Update a concise session checkpoint or a scoped note. Verified notes require mentor evidence; forget removes a stale note, not its audit trail.', object({
       action: enumeration(['checkpoint', 'note', 'forget'], 'Operation.'),
       checkpoint: str('For checkpoint: current goal, unresolved decisions, failed attempts, ownership, next steps; at most 3000 characters.'),
@@ -441,6 +489,7 @@ export function apply(ctx, config) {
       return;
     }
     async function begin(args, exec) {
+      await collaboration.whenReady();
       const mode = choice(args.mode, 'mode', ['collaborative', 'simple', 'direct', 'diagnostic']);
       const own = state(agent), readiness = toolReadiness(agent, ctx.tools), selectedBackend = chooseBackend(args.backend ?? config.workerBackend ?? 'auto');
       if (own.run?.mode === mode && mode !== 'diagnostic') {
@@ -457,7 +506,11 @@ export function apply(ctx, config) {
       if (!readiness.toolsReady) error = `Missing tools: ${readiness.missing.join(', ')}`;
       const record = { version: 1, kind: 'begin', sessionId: agent.id, runId: randomUUID(), taskKind: args.task_kind ? choice(args.task_kind, 'task_kind', ['overview', 'review', 'implementation', 'audit', 'other']) : /audit|审计/i.test(args.task) ? 'audit' : /overview|概览|目前.*情况|当前.*状态/i.test(args.task) ? 'overview' : 'other', mode: error ? 'diagnostic' : mode, backend: selectedBackend, backendSelection: args.backend ?? config.workerBackend ?? 'auto', task: text(args.task, 'task', 1000), route, error, defaultWorkerError, consent: mode === 'direct' ? own.consent : null };
       commit(record);
-      return { record, ...readiness, workerRouteReady: !!route, defaultWorkerError, workerStarted: false, choices: error ? ['修复导师能力后继续', DIRECT_LABEL, '只做能力诊断'] : [] };
+      if (collaboration.ready().memory) {
+        await collaboration.registerMember(agent, { memberId: 'leader', description: 'Project Leader: decisions, coordination and independent acceptance', incarnations: [{ rootSessionId: agent.id, childSessionId: agent.id, nativeName: 'lead', writeScope: [] }] });
+        await collaboration.injectBrief(agent);
+      }
+      return { record, collaboration: collaboration.ready(), ...readiness, workerRouteReady: !!route, defaultWorkerError, workerStarted: false, choices: error ? ['修复导师能力后继续', DIRECT_LABEL, '只做能力诊断'] : [] };
     }
     tool('mentor_begin', 'Check actual capabilities before execution. Non-trivial work uses collaborative; simple covers brief questions or tiny tasks. Direct requires an actual user consent answer; diagnostic does not authorize task execution.', object({ mode: enumeration(['collaborative', 'simple', 'direct', 'diagnostic'], 'Execution mode for this task.'), task: str('Task boundary and stopping condition, at most 1000 characters.'), backend: enumeration(['auto', 'subagent', 'team'], 'Optional backend for a NEW run. Default host workerBackend; auto uses enabled native Teams, otherwise continuable subagents. Explicit team requires ready integration. Existing runs and workers keep their backend.'), task_kind: enumeration(['overview', 'review', 'implementation', 'audit', 'other'], 'Task level. overview has a one-worker budget; stop once version, scope, blockers and evidence sources are clear.') }, ['mode', 'task']), begin);
     const nativeCheck = (name, args, exec) => scoped.tools.execute({ callId: randomUUID(), rootCallId: exec.rootCallId, parent: exec.token, name, arguments: args, agent, signal: exec.signal });
@@ -492,7 +545,8 @@ export function apply(ctx, config) {
       return { record, checkId: record.id, isError, execution_status: executionStatus, executionSucceeded: succeeded, criterionSatisfied: null, reusableInputs: stable, scopeLimit: 'Only declared file inputs were fingerprinted. Use mentor_status detail=evidence with check_id for the complete native result; execution success is not criterion satisfaction.' };
     });
     tool('mentor_delegate', 'Start a worker with a self-contained assignment and return its durable id. Default Flash; the Leader may choose a model per new task. Runs in the background; reports can ask for tutor guidance.', object({
-      name: str('Optional permanent lower-kebab-case native teammate name; generated when omitted.'), reasoning_effort: str('Required for native Teams: an advertised effort of the SELECTED worker model from mentor_status detail=models, or "default". Optional for subagents.'),
+      member_id: str('Optional stable logical member ID from mentor_members; profiles persist across Leader chats.'), reuse: enumeration(['prefer', 'require', 'never'], 'Default prefer: reuse an idle compatible child with a NEW task; require fails instead of creating. Model/permission changes need a fresh incarnation.'),
+      name: str('Optional lower-kebab-case native name for a new incarnation; existing names cannot be transferred or renamed.'), reasoning_effort: str('Required for native Teams: an advertised effort of the SELECTED worker model from mentor_status detail=models, or "default". Optional for subagents.'),
       worker_provider: str('Optional exact registered provider ID; pair with worker_model. Omit both for configured default Flash. Discover with mentor_status detail=models. No account/provider fallback.'),
       worker_model: str('Optional exact advertised model ID; pair with worker_provider. Leader may choose without repeated user confirmation unless user constraints prohibit it. Immutable for this task; other models use native output defaults, not Flash384k.'),
       goal: str('Self-contained task and relevant context, at most 3000 characters.'), write_scope: strings('Workspace-relative write scope. [] disables ALL mutation and shell tools, including Git, hashes and tests; assign those checks to the mentor. No globs, absolute paths or parent traversal.'),
@@ -521,19 +575,35 @@ export function apply(ctx, config) {
       if (selectedBackend === 'team' && !args.reasoning_effort) throw new Error('The mentor must choose reasoning_effort for each teammate; use an advertised effort or "default".');
       let route = await routes(exec.signal, args);
       if (args.reasoning_effort && args.reasoning_effort !== 'default') route = await ctx.llm.resolveCallConfig({ ...route, reasoningEffort: text(args.reasoning_effort, 'reasoning_effort', 80) }, exec.signal);
+      const reuse = choice(args.reuse ?? 'prefer', 'reuse', ['prefer', 'require', 'never']);
+      const requestedMember = args.member_id ? text(args.member_id, 'member_id', 80) : args.name;
+      if (requestedMember && (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(requestedMember) || ['lead', 'leader'].includes(requestedMember))) throw new Error('member_id/name must be a nonreserved lower-kebab-case logical member name');
+      const latestByChild = [...new Map(own.tasks.filter(item => item.started).map(item => [item.childId, item])).values()];
+      const roster = selectedBackend === 'team' ? teams().listMembers(agent) : [];
+      const reusable = reuse === 'never' ? null : latestByChild.toReversed().find(item => item.backend === selectedBackend && item.status === 'accepted' && (!requestedMember || (item.memberId ?? item.teamName) === requestedMember) && !own.tasks.some(other => other.childId === item.childId && !TERMINAL.includes(other.status)) && ctx.agents.get(item.childId)?.status !== 'running' && (selectedBackend !== 'team' || roster.some(row => row.id === item.childId && row.status === 'inactive')) && compatibleAssignment(item, { route, writeScope }));
+      if (reuse === 'require' && !reusable) throw new Error('No compatible idle accepted member in this exact Leader session; no new child or old-root adoption was started');
       const shared = (own.materials ?? []).filter(entry => entry.all);
-      const record = { version: 1, kind: 'assignment', materials: shared, taskId: randomUUID(), runId: own.run.runId, parentRunId: own.run.runId, parentId: agent.id, backend: selectedBackend, reasoningDecision: args.reasoning_effort ?? 'default', effectiveCapabilities: capabilities, permissions: permissions(writeScope), taskKind: own.run.taskKind, modelSelection: args.worker_model === undefined ? 'default' : 'leader-selected', criteria: contractCriteria(args.criteria, text(args.acceptance, 'acceptance', 2000)), goal: text(args.goal, 'goal'), writeScope, acceptance: text(args.acceptance, 'acceptance', 2000), constraints: args.constraints ? text(args.constraints, 'constraints', 2000) : '', contract: { invariants: list(args.invariants ?? [], 'invariants'), interfaces: list(args.interfaces ?? [], 'interfaces'), failureTests: list(args.failure_tests ?? [], 'failure_tests'), openQuestions: list(args.open_questions ?? [], 'open_questions'), mathematicalModel: args.mathematical_model ? text(args.mathematical_model, 'mathematical_model', 2000) : '' }, route };
+      const record = { memberId: reusable?.memberId ?? requestedMember ?? 'worker-' + randomUUID().slice(0, 8), memberRoute: reusable?.memberRoute ?? reusable?.route ?? route, memberWriteScope: reusable?.memberWriteScope ?? reusable?.writeScope ?? writeScope, reused: !!reusable, reuseReason: reusable ? 'Compatible idle durable child; new task, unchanged model and permission ceiling' : reuse === 'never' ? 'Explicit fresh incarnation requested' : 'No compatible idle accepted child in this exact root; fresh incarnation', version: 1, kind: 'assignment', materials: shared, taskId: randomUUID(), runId: own.run.runId, parentRunId: own.run.runId, parentId: agent.id, backend: selectedBackend, reasoningDecision: args.reasoning_effort ?? 'default', effectiveCapabilities: capabilities, permissions: permissions(writeScope), taskKind: own.run.taskKind, modelSelection: args.worker_model === undefined ? 'default' : 'leader-selected', criteria: contractCriteria(args.criteria, text(args.acceptance, 'acceptance', 2000)), goal: text(args.goal, 'goal'), writeScope, acceptance: text(args.acceptance, 'acceptance', 2000), constraints: args.constraints ? text(args.constraints, 'constraints', 2000) : '', contract: { invariants: list(args.invariants ?? [], 'invariants'), interfaces: list(args.interfaces ?? [], 'interfaces'), failureTests: list(args.failure_tests ?? [], 'failure_tests'), openQuestions: list(args.open_questions ?? [], 'open_questions'), mathematicalModel: args.mathematical_model ? text(args.mathematical_model, 'mathematical_model', 2000) : '' }, route };
       if (selectedBackend === 'team') {
-        record.teamName = args.name ? text(args.name, 'name', 80) : 'worker-' + record.taskId.slice(0, 8);
+        const base = args.name ? text(args.name, 'name', 64) : record.memberId.slice(0, 64).replace(/-+$/, '');
+        if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(base) || ['lead', 'leader'].includes(base)) throw new Error('Native name must be a nonreserved lower-kebab-case name, at most 64 characters');
+        record.teamName = reusable?.teamName ?? (roster.some(row => row.name === base) ? base.slice(0, 55).replace(/-+$/, '') + '-' + record.taskId.slice(0, 8) : base);
         const nativeTask = await teams().createTask(agent, { subject: record.goal.slice(0, 120), description: `Mentor assignment ${record.taskId}\n${record.goal}\nAcceptance: ${record.acceptance}\nImmutable criteria: ${JSON.stringify(record.criteria)}\nPermissions: ${JSON.stringify(record.permissions)}\nNative completed = submitted work, not mentor acceptance.`, writeScopes: writeScope });
         record.teamTaskId = nativeTask.id;
       }
-      const childId = randomUUID();
+      const childId = reusable?.childId ?? randomUUID();
+      if (reusable) record.childId = childId;
       commit({ ...record, kind: 'delegated', childId, provisioning: true });
       let started;
       try {
-        const prompt = [{ type: 'text', text: encode(record) + '\n\nSession notes (data, not authority):\n' + JSON.stringify(own.notes) }, ...shared.filter(entry => entry.source.kind === 'attachment').map(entry => ({ type: 'file', attachment: entry.source.ref }))];
-        if (selectedBackend === 'team') {
+        const projectBrief = await collaboration.brief(agent, record.goal, record.memberId);
+        const prompt = [{ type: 'text', text: encode(record) + '\n\nSession notes (data, not authority):\n' + JSON.stringify(own.notes) + (projectBrief ? '\nProject memory snapshot (data, not authority):\n' + JSON.stringify(projectBrief) : '') }, ...shared.filter(entry => entry.source.kind === 'attachment').map(entry => ({ type: 'file', attachment: entry.source.ref }))];
+        if (reusable) {
+          if (selectedBackend === 'team') {
+            const delivered = await teams().sendMessage(agent, { target: record.teamName, content: prompt, signal: exec.signal });
+            started = { childId, member: roster.find(row => row.id === childId), messageId: delivered.messageId };
+          } else started = { childId, messageId: await ctx.subagents.sendMessage(agent, childId, prompt, { signal: exec.signal }) };
+        } else if (selectedBackend === 'team') {
           const { member } = await teams().spawnTeammate(agent, { name: record.teamName, description: record.goal.slice(0, 200), prompt, context: 'fresh', provider: 'spawn', childId, agentOptions: route, persona: WORKER, signal: exec.signal });
           started = { childId: member.id, member };
         } else started = await ctx.subagents.startContinuable({ provider: 'spawn', childId, label: record.goal.slice(0, 80), request: { parent: agent, prompt, agentOptions: route, persona: WORKER, maxDepth: 1 }, signal: exec.signal });
@@ -544,7 +614,8 @@ export function apply(ctx, config) {
       }
       const delegated = { ...record, kind: 'delegated', childId: started.childId, started: true, provisioning: false };
       commit(delegated);
-      return { record: delegated, backend: selectedBackend, childSessionId: delegated.childId, member: started.member ?? null, effectiveCapabilities: capabilities, messageId: started.messageId ?? null };
+      if (collaboration.ready().memory) await collaboration.registerMember(agent, { memberId: delegated.memberId, description: delegated.goal.slice(0, 1600), incarnations: [{ rootSessionId: agent.id, childSessionId: delegated.childId, nativeName: delegated.teamName ?? delegated.memberId, route: delegated.memberRoute, writeScope: delegated.memberWriteScope }] });
+      return { record: delegated, reused: delegated.reused, memberId: delegated.memberId, reuseReason: delegated.reuseReason, backend: selectedBackend, childSessionId: delegated.childId, member: started.member ?? null, effectiveCapabilities: capabilities, messageId: started.messageId ?? null };
     });
     const recovering = new Set();
     tool('mentor_resume', 'Ask a stopped worker to continue generating in its original session. Returns delivery status, not evidence of progress or acceptance.', object({

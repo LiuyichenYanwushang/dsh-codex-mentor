@@ -19,6 +19,30 @@ DSH 0.2.0-rc.2 的独立模式 bundle。非 OpenAI/DeepSeek 官方产品；提�
 
 Flash 默认自动选择已配置且目录中包含 `deepseek-flash`（显示名 DeepSeek-V41-Flash）的 `deepseek-account`，其次 `deepseek-official`。选择发生在派工前，实际路由写入子会话描述和任务记录；推理失败不会自动换成 GPT，也不会切换账户。其他 provider 可以通过 `codex-mentor-host` 配置显式指定。缺凭据时在 Settings → Models 配置；目录可用不是推理成功的证明。
 
+## 0.11.0：项目长期协作团队
+
+- **长期共享知识与成员笔记**：`mentor_knowledge` 提供 list/search/read/note/revise/confirm/invalidate/forget。原生 `storageDomain` 存储跨重启、跨同工作区 Leader 会话的项目数据；项目身份由授权 Leader 的真实规范 cwd 派生，调用者不能指定任意项目。shared/project 知识由全体贡献；member 笔记只对该逻辑成员及 Leader/用户开放。API 可见范围不是同进程共享文件系统的保密沙箱。
+- 每条记忆带作者、来源会话/任务、版本、适用条件、证据、验证状态和有界修订历史。worker 只能修改自己的记录，不能确认 verified；确认须有证据。文本变更默认回到 hypothesis，不继承旧确认。修改/删除须 `expected_revision`，冲突拒绝而非覆盖。删除清除长期记录的正文/历史，保留无正文的审计 tombstone；不宣称抹除已经进入会话日志的副本。原有 `mentor_memory` 仍是会话 checkpoint，不替代它。
+- **逻辑成员、执行实例、不可变任务分离**：`mentor_members` 查档案和当前实例；`mentor_delegate` 默认 `reuse:"prefer"`，也可 `require` 或 `never`，用 `member_id` 指定稳定身份。同一 Leader 原生 root 中优先复用已接受、空闲、模型/预算/推理程度一致且新写范围不超过成员原始权限上限的原子会话。每次仍创建新 task/native task，旧报告/验收不重开。模型切换、权限提升、忙碌或不匹配时使用新实例并说明原因；不制造永远驻留的池。
+- 原生 TeamId 等于 Leader SessionId。新建 Leader 聊天/fork 不能接管旧 child；可用同一个 `member_id` 继承项目档案/笔记，但创建新的原生实例。休眠是原生释放驻留实例后按需冷恢复，不代表长期后台推理。逻辑成员数量不设新配额；32 条近期实例引用只是档案摘要，原生 roster/Session 历史不删除。
+- **点对点通讯**：`mentor_message` 使用原生 Teams 的真实发送者、永久成员名和持久消息。带话题/回复/任务引用；每线程最多 8 次发送尝试，原生 root 日志记录预算，失败也消耗一次。无自动广播、阅读/理解回执或自动致谢循环。Mentor 模式 raw `send_message` 被引导到该有界入口，报告/指导仍直接用原生服务。普通 subagent 后端保留父子通讯/记忆/复用，但不伪称支持兄弟直连。
+- **讨论班**：`mentor_discussion` 的 create/list/read/post/advance/close 共用一个持久业务入口，默认两轮、最多八轮；每次可选 1–16 个现有空闲且正式任务已关闭的成员，这是讨论成本预算而非团队人数上限，不创建成员、不暂停执行中的工作。第一轮先独立陈述，worker 在发表前看不到别人的初始观点；每人每轮一条陈述。推进须回应齐备，或 Leader 显式 `skip_missing:true` 并写 reason。保留分歧/待验证/下一步，关闭讨论不接受任务、不自动创建 verified 记忆。
+- 讨论/同伴活动不会扩大写权限；休眠的已关闭成员只在显式消息邀请后进行只读协作，不能 shell/写文件/改任务控制。发送可能唤醒模型并产生费用。投递状态 queued/accepted 不等于阅读、进度、正确性或完成。消息/Domain 两个原生持久边界之间不承诺分布式事务或 exactly-once：未知 pending 不在重启后自动重发。
+- **现有 GUI**：输入框下方的“导师协作”可展开记忆/成员/讨论三页。搜索、详情、修订、确认/失效、删除确认、实例/任务状态、发起/发言/推进/结束讨论都走与工具相同的 Host 业务逻辑。明确用户操作才发送；无轮询、自动改记录或另开服务器。冷 Leader 会话可只读查记忆/历史及编辑长期笔记，不为页面查询恢复旧模型工作；发送讨论须有活动原生 Team。UI 防止切会话、取消及旧请求覆盖新视图，使用原生 locale/theme tokens。
+- 模型仅收到有界的相关记忆快照；快照来源/版本通过原生消息或 tool/result 留在会话日志。资料共享仍走原授权入口，不把跨会话附件 ID 自动升级成公开资料。首版原生单 Host、线性关键词检索、单项目 record 原子更新；不引入向量库、MCP 记忆框架、额外调度器或多进程同步。
+- 原生 tokenMeter 的同一 surface 首轮工具成本对照（去掉四个新工具和两个委派字段作基线，不是外部 tokenizer/完整旧版本请求）：Leader 8562→9951（+1389），worker 5902→7199（+1297）估算 tokens；保持按需详情与有界检索，不每轮塞入完整长期记录。
+- 验证使用本机真实 DSH0.2.0-rc.2 服务及确定性模型适配器，不调用外部推理。完整 136 项通过、0 skipped：包括两份任务同一原生 child 冷复用、保留旧验收、父成员私有笔记不泄露、实际点对点问答/线程预算、独立双轮讨论与保留分歧、原生 Typert SRC 调用、同项目跨 Root 继承/异项目隔离、冷 GUI 查询不恢复模型、无 Teams 时记忆可用、真实存储验证 GUI 修订，以及生成的发布 GUI 与测试源码完全一致。
+- 原生存储/通讯不可用时明确失败；`CodexMentor.diagnostics.collaboration` 报告实际 readiness。升级安装器报告 restart-required 时须重启现有服务并刷新页面，不以包版本替代实际激活验证。
+
+```js
+mentor_knowledge({action:"search",query:"parser"})
+mentor_knowledge({action:"note",scope:"member",conclusion:"失败方法与适用范围",evidence:"实际检查",conditions:"相关版本"})
+mentor_members({})
+mentor_delegate({member_id:"parser-expert",reuse:"prefer",reasoning_effort:"default",goal:"新的有界任务",write_scope:["src/parser"],acceptance:"独立检查的标准"})
+mentor_message({target:"reviewer",kind:"question",text:"请质询这个观察",thread_id:"parser-contract"})
+mentor_discussion({action:"create",topic:"比较两个方案，保留分歧",participants:["parser-expert","reviewer"],maxRounds:2})
+```
+
 ## 0.10.2：清除 profile 中仍生效的人数覆盖
 
 - 实际 profile 可能覆盖 bundle 默认值：本次检测到子代理 `30`、原生 Teams `8`。仅发布 0.10.1 不能证明这些覆盖已解除。

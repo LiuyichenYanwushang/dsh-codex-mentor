@@ -1,6 +1,6 @@
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
-import { SUMMARY_INSTRUCTION } from './prompts.js';
+import { SUMMARY_INSTRUCTION } from './prompts.js?mentor=0.11.0';
 
 // Keep DSH's pressure, persistence, cancellation and replay machinery unchanged.
 export default class MentorCompaction extends BasicCompactionEngine {

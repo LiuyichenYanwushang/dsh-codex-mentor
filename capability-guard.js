@@ -1,4 +1,4 @@
-import { toolReadiness } from './experience.js';
+import { toolReadiness } from './experience.js?mentor=0.11.0';
 
 export const name = 'codex-mentor-capability-guard';
 export const inject = ['tools', 'systemPrompt'];

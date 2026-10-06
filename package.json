@@ -1,14 +1,14 @@
 {
   "name": "dsh-codex-mentor",
-  "version": "0.10.2",
-  "description": "Mentor collaboration: current-model leader, default-Flash or Leader-selected worker models via subagents or native Teams, shared attachments/PDF text reading, strict acceptance and replayable memory.",
+  "version": "0.11.0",
+  "description": "Mentor long-term collaboration: shared project/member memory, reuse-first durable teammates, native peer messages, bounded seminars and GUI; scoped materials and strict independent acceptance.",
   "private": true,
   "repository": { "type": "git", "url": "https://github.com/LiuyichenYanwushang/dsh-codex-mentor.git" },
   "homepage": "https://github.com/LiuyichenYanwushang/dsh-codex-mentor#readme",
   "type": "module",
   "exports": { ".": "./index.js", "./compaction": "./compaction.js", "./capability-guard": "./capability-guard.js", "./package.json": "./package.json" },
-  "files": ["*.js", "cordis.patch.yml", "README.md", "scripts/patch-native-teams.mjs", "runtime-patches"],
-  "scripts": { "test": "node --test test/*.test.mjs" },
+  "files": ["*.js", "gui", "cordis.patch.yml", "README.md", "scripts/patch-native-teams.mjs", "scripts/build-client.mjs", "runtime-patches"],
+  "scripts": { "build": "node scripts/build-client.mjs", "test": "node --test test/*.test.mjs" },
   "peerDependencies": { "@deepseek-ai/dsh": "0.2.0-rc.2", "dsh-codex-connect": "^0.2.0-alpha.1" },
   "peerDependenciesMeta": { "dsh-codex-connect": { "optional": true } },
   "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
