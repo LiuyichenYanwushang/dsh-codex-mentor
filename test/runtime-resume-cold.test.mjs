@@ -35,7 +35,8 @@ class InterruptedAdapter extends LlmAdapter {
     if (step === 1) throw new Error('Simulated provider interruption; not a diagnosis of the user failure');
     assert.equal(state.checkpoint, 'checkpoint-before-simulated-provider-interruption');
     assert.equal(state.tasks[0].guidance.purpose, 'lifecycle-repair');
-    assert.match(state.tasks[0].guidance.nextSteps, /^继续生成/);
+    assert.equal(state.tasks[0].guidance.nextSteps, '续'.repeat(32000));
+    assert.match(state.tasks[0].guidance.diagnosis, /Preserve the original model, scope and constraints/);
     return yield* reply('mentor_report', { task_id: state.tasks[0].taskId, status: 'ready-review', summary: 'Recovered original checkpoint', evidence: 'Scripted fixture only; no external provider inference or implementation accepted', changes: [], checks: [], criteria: [{ id: 'AC1', status: 'PASS', evidence: 'Original checkpoint recovered in the same Flash child', scope: 'Scripted cold-continuation fixture only; no external provider or implementation verified' }], risks: [] });
   }
 }
@@ -84,7 +85,7 @@ test('mentor_resume cold-restores the same failed Flash child and checkpoint wit
     assert.equal(stateOf(ctx, handle.agent).tasks[0].status, 'stopped');
     let continuation;
     await observe(ctx, handle.agent, state => state.tasks[0]?.status === 'ready-review', async () => {
-      continuation = await execute(handle.agent, 'mentor_resume', { task_id: identity.taskId });
+      continuation = await execute(handle.agent, 'mentor_resume', { task_id: identity.taskId, message: '续'.repeat(32000) });
       assert.equal(continuation.isError, false, JSON.stringify(continuation));
       assert.equal(continuation.value.outcome, 'requested');
       assert.equal(continuation.value.childSessionId, identity.childId);

@@ -31,7 +31,7 @@ function waitFor(ctx, predicate, timeout = 12000) {
   });
 }
 class Fixture extends LlmAdapter {
-  constructor(ctx) { super(); this.ctx = ctx; this.calls = []; this.costs = new Map(); this.claimSeen = new Set(); this.peerSeen = new Set(); this.memoryRequests = []; this.memoryWritten = new Set(); }
+  constructor(ctx) { super(); this.ctx = ctx; this.calls = []; this.costs = new Map(); this.claimSeen = new Set(); this.peerSeen = new Set(); this.peerPayloads = []; this.memoryRequests = []; this.memoryWritten = new Set(); }
   async listModels(provider) { return [{ provider, id: 'deepseek-flash', name: 'Local collaboration fixture', context: { contextWindow: 1000000 } }]; }
   async resolveModel(provider, id) { return (await this.listModels(provider))[0]; }
   async *stream(options) {
@@ -44,6 +44,18 @@ class Fixture extends LlmAdapter {
       const delegate = beforeTools.find(tool => tool.name === 'mentor_delegate');
       if (delegate) { delete delegate.parameters.properties.member_id; delete delegate.parameters.properties.reuse; }
       const config = { provider: options.provider, model: options.model };
+      const oldDescriptions = {
+        mentor_message: { text: 'At most 2000 characters.' },
+        mentor_resume: { message: 'Optional brief continuation instruction; default 继续生成. Existing scope, model and acceptance rules stay unchanged. At most 1000 characters.' },
+        mentor_report: { summary: 'Observed state or change summary, at most 2000 characters.', evidence: 'Paths, checks and actual results, at most 3000 characters.', attempts: 'For blocked: distinct attempts and results, or why no safe attempt is allowed.', question: 'For blocked: specific decision or diagnostic help needed.' },
+        mentor_guide: { diagnosis: 'Evidence-based diagnosis, explicitly label hypotheses.', next_steps: 'Specific checks/actions, at most 3000 characters.', validation: 'Result that confirms or falsifies the advice.', fallback: 'What to report or do if the check fails.' },
+        mentor_review: { evidence: 'Interpreted evidence or specific correction/cancellation instructions.' }
+      };
+      const priorSchemas = structuredClone(options.tools);
+      for (const tool of priorSchemas) for (const [field, description] of Object.entries(oldDescriptions[tool.name] ?? {})) tool.parameters.properties[field].description = description;
+      const schemaBefore = this.ctx.tokenMeter.measure(agent.session, { config, tools: priorSchemas }).totalTokens;
+      const schemaAfter = this.ctx.tokenMeter.measure(agent.session, { config, tools: options.tools }).totalTokens;
+      console.log('COMMUNICATION_LIMIT_SCHEMA_COST', JSON.stringify({ role, before: schemaBefore, after: schemaAfter, added: schemaAfter - schemaBefore, kind: 'native heuristic, actual first request surface; only changed parameter descriptions restored for baseline' }));
       const before = this.ctx.tokenMeter.measure(agent.session, { config, tools: beforeTools }).totalTokens;
       const after = this.ctx.tokenMeter.measure(agent.session, { config, tools: options.tools }).totalTokens;
       this.costs.set(role, { before, after, added: after - before, kind: 'native heuristic; baseline removes four new tools and two delegation fields on the same surface' });
@@ -104,6 +116,7 @@ class Fixture extends LlmAdapter {
     if (peer) {
       this.peerSeen.add(agent.id + peer.text);
       const payload = JSON.parse(peer.text.slice(peer.text.indexOf(COLLAB_PREFIX) + COLLAB_PREFIX.length).split('\n')[0]);
+      this.peerPayloads.push(payload);
       if (payload.kind === 'question' && task.teamName === 'analyst') { yield* output('mentor_message', { target: 'reviewer', kind: 'question', text: 'Check this attributed observation', thread_id: payload.threadId }); return; }
       if (payload.kind === 'question' && task.teamName === 'reviewer') { yield* output('mentor_message', { target: 'analyst', kind: 'reply', text: 'Independent concern retained', thread_id: payload.threadId }); return; }
     }
@@ -115,7 +128,7 @@ async function kernel(root, nativeTeams = true) {
   for (const name of ['cordis-plugin-loader', 'dsh-llm', 'dsh-session', 'dsh-session-projection', 'dsh-token-meter', 'dsh-system-prompt', 'dsh-tools', 'dsh-agent', 'dsh-agent-loop', 'dsh-agent-preset-registry', 'dsh-subagent', 'dsh-subagent-spawn-in-process', 'dsh-typert-registry', 'dsh-api-gateway', 'dsh-storage']) {
     const mod = await import('@deepseek-ai/' + name); await ctx.plugin(mod.default ?? mod, name === 'dsh-agent-preset-registry' ? { default: 'standard' } : {});
   }
-  for (const [name, config] of [['dsh-storage-json', { root: join(root, 'storage') }], ['dsh-storage-domain', { backend: 'json' }], ['dsh-session-persistence-jsonl', { root: join(root, 'sessions'), compression: 'none' }], ['dsh-session-query-sqlite', { path: ':memory:', openAt: 'never' }], ['dsh-experimental-agent-team', {}], ['dsh-experimental-tool-agent-team', {}]]) {
+  for (const [name, config] of [['dsh-storage-json', { root: join(root, 'storage') }], ['dsh-storage-domain', { backend: 'json' }], ['dsh-session-persistence-jsonl', { root: join(root, 'sessions'), compression: 'none' }], ['dsh-session-query-sqlite', { path: ':memory:', openAt: 'never' }], ['dsh-experimental-agent-team', { maxMessageBytes: 1048576 }], ['dsh-experimental-tool-agent-team', {}]]) {
     if (!nativeTeams && name.includes('agent-team')) continue;
     const mod = await import('@deepseek-ai/' + name); await ctx.plugin(mod.default ?? mod, config);
   }
@@ -169,7 +182,7 @@ test('native tools/Remote, durable member reuse, scoped memory, direct peer mess
     const other = await call(ctx, root, 'mentor_delegate', { member_id: 'reviewer', name: 'reviewer', reasoning_effort: 'default', goal: 'Independent reviewer fixture', write_scope: [], acceptance: 'Bounded reviewer observation' });
     await accept(ctx, root, other.record);
     assert.equal(JSON.stringify(h.adapter.memoryRequests.filter(request => request.taskId === other.record.taskId)).includes('Analyst-private'), false, 'Sibling receives only its own member notes');
-    const sent = await call(ctx, root, 'mentor_message', { target: 'analyst', kind: 'question', text: 'Ask reviewer without reopening work', thread_id: 'fixture-peer' }); assert.ok(sent.messageId);
+    const sent = await call(ctx, root, 'mentor_message', { target: 'analyst', kind: 'question', text: '联'.repeat(32000), thread_id: 'fixture-peer' }); assert.ok(sent.messageId);
     try { await waitFor(ctx, () => (state(ctx, root).peerThreads['fixture-peer'] ?? 0) >= 3); }
     catch (error) {
       const debug = await ctx.sessionQuery.readSession(first.record.childId);
@@ -177,6 +190,9 @@ test('native tools/Remote, durable member reuse, scoped memory, direct peer mess
       throw error;
     }
     await waitFor(ctx, () => !ctx.agents.get(first.record.childId) && !ctx.agents.get(other.record.childId));
+    assert.ok(h.adapter.peerPayloads.some(payload => payload.text === '联'.repeat(32000)), 'Real peer sender, native mailbox and recipient retain all 32k characters');
+    const tooLong = await root.ctx.tools.execute({ callId: randomUUID(), name: 'mentor_message', arguments: { target: 'analyst', kind: 'finding', text: '联'.repeat(32001), thread_id: 'oversized-text' }, agent: root, signal: new AbortController().signal });
+    assert.equal(tooLong.isError, true); assert.equal(state(ctx, root).peerThreads['oversized-text'], undefined, 'Oversize rejection precedes budget reservation and native delivery');
     assert.ok(state(ctx, root).tasks.every(task => task.status === 'accepted'));
     const created = await ctx.typertGateway.invoke({ namespace: 'mentorCollaboration', method: 'discussion', args: { sessionId: root.id, request: { action: 'create', topic: 'Independent fixture seminar', participants: ['analyst', 'reviewer'], maxRounds: 2 } } });
     const roomId = created.room.id, table = ctx.storageDomain.get('codex_mentor_discussions').table('rooms');

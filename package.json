@@ -1,6 +1,6 @@
 {
   "name": "dsh-codex-mentor",
-  "version": "0.11.2",
+  "version": "0.11.3",
   "description": "Mentor-owned collaboration: milestone memory and bounded worker system-prompt knowledge, reusable members, native peer messages and seminars; scoped materials and strict independent acceptance.",
   "private": true,
   "repository": { "type": "git", "url": "https://github.com/LiuyichenYanwushang/dsh-codex-mentor.git" },

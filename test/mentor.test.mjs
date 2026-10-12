@@ -8,7 +8,7 @@ const runtime = createRequire(resolve(process.env.DSH_RUNTIME_DIR ?? resolve(dir
 registerHooks({ resolve(specifier, context, next) { return next((specifier.startsWith('@deepseek-ai/') || specifier === 'zod') ? runtime.resolve(specifier) : specifier, context); } });
 const { snapshotJsonValue } = await import('@deepseek-ai/dsh-util-values');
 const { apply, Config } = await import('../index.js');
-const { initial, fold, view, encode, contextText, KEY, PRESET } = await import('../ledger.js');
+const { initial, fold, view, encode, contextText, KEY, PRESET, COMMUNICATION_TEXT_LIMIT, PROTOCOL_MESSAGE_LIMIT } = await import('../ledger.js');
 const { cooperation } = await import('../experience.js');
 
 test('mentor review is critical and compassionate; autonomous collaboration has no default manual entry', async () => {
@@ -17,7 +17,8 @@ test('mentor review is critical and compassionate; autonomous collaboration has 
   const { readFile } = await import('node:fs/promises');
   const patch = await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8');
   assert.match(patch, /id: codex-mentor-gui\s+name: '\.\/gui\/index\.js'\s+disabled: true/);
-  assert.match(patch, /id: codex-mentor-host\s+name: '\.\/host-0\.11\.2\.js'/);
+  assert.match(patch, /id: codex-mentor-host\s+name: '\.\/host-0\.11\.3\.js'/);
+  assert.match(patch, /maxMessageBytes: 1048576/);
   const { WORKER } = await import('../prompts.js');
   assert.match(MENTOR, /Record useful discoveries[\s\S]*before compaction, handoff or closing a task/);
   assert.match(WORKER, /before blocked\/ready-review reports, compaction or handoff/);
@@ -240,6 +241,32 @@ test('mentor -> blocked worker -> concrete guidance -> ready-review -> acceptanc
   await h.call(mentor, 'mentor_review', { task_id: taskId, verdict: 'accepted', verification_ids: [check.checkId], evidence: 'Reviewed diff; reran parser test: PASS' });
   assert.equal(h.state(mentor).tasks[0].status, 'accepted');
   assert.ok(contextText(h.state(mentor)).includes('Mentor facts'));
+});
+
+test('32k communication fields deliver intact, reject 32001 and replay with bounded envelopes', async () => {
+  assert.equal(COMMUNICATION_TEXT_LIMIT, 32000);
+  const h = harness(), root = await h.makeAgent('large-message-root');
+  const { record } = await h.call(root, 'mentor_delegate', { goal: 'Bounded communications fixture', write_scope: [], acceptance: 'Original scope retained' });
+  const worker = h.agents.get(record.childId), body = '文'.repeat(32000), extra = body + '字';
+  const report = { task_id: record.taskId, status: 'blocked', summary: body, evidence: body, attempts: body, question: body };
+  for (const field of ['summary', 'evidence', 'attempts', 'question']) await assert.rejects(h.call(worker, 'mentor_report', { ...report, [field]: extra }), /at most 32000/);
+  await h.call(worker, 'mentor_report', report);
+  for (const field of ['summary', 'evidence', 'attempts', 'question']) assert.equal(h.state(root).tasks[0].report[field], body);
+  const guide = { task_id: record.taskId, diagnosis: body, next_steps: body, validation: body, fallback: body };
+  for (const field of ['diagnosis', 'next_steps', 'validation', 'fallback']) await assert.rejects(h.call(root, 'mentor_guide', { ...guide, [field]: extra }), /at most 32000/);
+  await h.call(root, 'mentor_guide', guide);
+  for (const field of ['diagnosis', 'nextSteps', 'validation', 'fallback']) assert.equal(h.state(worker).tasks[0].guidance[field], body);
+  h.append(root, 'user/message', { id: 'large-message-stop', source: { kind: 'subagent-settled', senderSessionId: worker.id, summary: 'Stopped fixture' } });
+  await assert.rejects(h.call(root, 'mentor_resume', { task_id: record.taskId, message: extra }), /at most 32000/);
+  const resumed = await h.call(root, 'mentor_resume', { task_id: record.taskId, message: body });
+  assert.equal(resumed.childSessionId, worker.id);
+  assert.equal(h.state(worker).tasks[0].guidance.nextSteps, body, 'Recovery instructions do not consume user-text capacity');
+  assert.match(h.state(worker).tasks[0].guidance.diagnosis, /Preserve the original model, scope and constraints/);
+  await assert.rejects(h.call(root, 'mentor_review', { task_id: record.taskId, verdict: 'cancelled', evidence: extra }), /at most 32000/);
+  await h.call(root, 'mentor_review', { task_id: record.taskId, verdict: 'cancelled', evidence: body });
+  assert.equal(h.state(worker).tasks[0].review.evidence, body);
+  for (const agent of [root, worker]) assert.deepEqual(view(agent.session.events.reduce(fold, initial(agent.session.header))), view(h.state(agent)));
+  assert.throws(() => encode({ kind: 'report', payload: 'x'.repeat(PROTOCOL_MESSAGE_LIMIT) }), error => error.diagnostic?.code === 'MESSAGE_TOO_LARGE' && error.diagnostic.max_characters === PROTOCOL_MESSAGE_LIMIT);
 });
 
 test('replay survives surface compaction and reconstructs guidance/checkpoints', async () => {
@@ -506,7 +533,8 @@ test('continue-generating resumes only the original stopped task and fences repl
   assert.equal(result.acceptance, 'unchanged'); assert.equal(result.taskStatus, 'resuming');
   assert.equal(h.agents.size, 2, 'no replacement or extra worker');
   assert.equal(h.state(mentor).tasks[0].route.model, 'deepseek-flash');
-  assert.match(h.state(worker).tasks[0].guidance.nextSteps, /^继续生成\n/);
+  assert.equal(h.state(worker).tasks[0].guidance.nextSteps, '继续生成');
+  assert.match(h.state(worker).tasks[0].guidance.diagnosis, /Recover the original assignment/);
   h.append(mentor, 'user/message', failure);
   assert.equal(h.state(mentor).tasks[0].status, 'resuming', 'old failure replay cannot undo a fresh continuation request');
   await assert.rejects(h.call(mentor, 'mentor_resume', { task_id: record.taskId }), /duplicate/);
@@ -590,7 +618,7 @@ test('acceptance-blocked submission can close unaccepted and native failure stil
   const facts = (await import('../protocol.js')).taskSummary(working);
   assert.equal(facts.execution.stoppedWithoutReport, false, 'a rework progress notice cannot erase the earlier submission');
   assert.equal(facts.report.id, originalReportId); assert.equal(facts.report.latestUpdateStatus, 'progress');
-  assert.throws(() => encode({ kind: 'report', payload: 'x'.repeat(24000) }), error => error.diagnostic?.code === 'MESSAGE_TOO_LARGE');
+  assert.throws(() => encode({ kind: 'report', payload: 'x'.repeat(PROTOCOL_MESSAGE_LIMIT) }), error => error.diagnostic?.code === 'MESSAGE_TOO_LARGE');
 });
 
 test('overview checks require a new uncertainty after four; output previews have one retrievable complete body', async () => {

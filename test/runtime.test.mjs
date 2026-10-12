@@ -54,14 +54,15 @@ class ScriptedAdapter extends LlmAdapter {
       assert.ok(names.includes('mentor_report')); assert.ok(!names.includes('mentor_delegate'));
       const task = state.tasks[0]; assert.ok(task, 'assignment admitted before worker model call');
       if (step === 0) return response('read', { file_path: fixture });
-      if (task.goal.endsWith('A') && !task.guidance) return response('mentor_report', { task_id: task.taskId, status: 'blocked', summary: 'Need contract decision', evidence: 'Read fixture AC1 and AC2', attempts: 'Inspected fixture; invalid-input behavior remains unspecified for this scenario', question: 'Should invalid input be rejected?' });
+      if (task.goal.endsWith('A') && !task.guidance) return response('mentor_report', { task_id: task.taskId, status: 'blocked', summary: 'Need contract decision', evidence: 'Read fixture AC1 and AC2', attempts: 'Inspected fixture; invalid-input behavior remains unspecified for this scenario', question: '问'.repeat(32000) });
+      if (task.goal.endsWith('A')) assert.equal(task.guidance.fallback.length, 32000, 'Native subagent receives the whole 32k tutor response');
       return response('mentor_report', { task_id: task.taskId, status: 'ready-review', summary: 'Read-only audit completed', evidence: 'Read fixture; no source changes', changes: [], checks: ['read contract fixture: AC1/AC2 inspected'], criteria: [{ id: 'AC1', status: 'PASS', evidence: 'Fixture requires rejecting invalid input', scope: 'Contract inspection only; no implementation tested' }, { id: 'AC2', status: 'PASS', evidence: 'No source changes; only fixture read', scope: 'Read-only fixture audit, no production project inspected' }], risks: [] });
     }
     assert.ok(names.includes('mentor_begin')); assert.ok(names.includes('mentor_verify'));
     if (!state.run) return response('mentor_begin', { mode: 'collaborative', task: 'Two independent read-only audit investigations' });
     if (state.tasks.length < 2) return response('mentor_delegate', { ...(state.tasks.length ? { worker_provider: 'openai-codex', worker_model: 'gpt-6.1-sol', reasoning_effort: 'medium' } : {}), goal: `Independent read-only audit ${state.tasks.length ? 'B' : 'A'}`, write_scope: [], acceptance: 'AC1 reject invalid input; AC2 no source edits', criteria: [{ id: 'AC1', description: 'Reject invalid input as specified by the fixture contract' }, { id: 'AC2', description: 'Audit only; no source edits' }] });
     const blocked = state.tasks.find(task => task.status === 'blocked');
-    if (blocked) return response('mentor_guide', { task_id: blocked.taskId, diagnosis: 'Hypothesis: the fixture establishes rejection', next_steps: 'Check AC1 in the fixture; do not edit project source', validation: 'AC1 explicitly requires rejecting invalid input', fallback: 'Report conflicting contract text instead of guessing' });
+    if (blocked) { assert.equal(blocked.report.question.length, 32000); return response('mentor_guide', { task_id: blocked.taskId, diagnosis: 'Hypothesis: the fixture establishes rejection', next_steps: 'Check AC1 in the fixture; do not edit project source', validation: 'AC1 explicitly requires rejecting invalid input', fallback: '退'.repeat(32000) }); }
     const ready = state.tasks.find(task => task.status === 'ready-review');
     if (ready) {
       const checks = ready.verifications?.filter(check => !check.isError && check.readyReportId === ready.report.id) ?? [];

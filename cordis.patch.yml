@@ -10,7 +10,7 @@
     maxMembers: 9007199254740991
     maxTasks: 9007199254740991
     maxPendingMessagesPerMember: 64
-    maxMessageBytes: 65536
+    maxMessageBytes: 1048576 # Native UTF-8/sender framing must carry multiple 32k text fields.
     disposalTimeoutMs: 5000
 - insert:
     - id: mentor-count-quota-migration
@@ -18,7 +18,7 @@
       config:
         applied: false # One-time native editor migration; preserve future explicit operator changes.
     - id: codex-mentor-host
-      name: './host-0.11.2.js'
+      name: './host-0.11.3.js'
       config:
         workerProvider: auto
         workerModel: deepseek-flash

@@ -64,8 +64,9 @@ class TeamAdapter extends LlmAdapter {
       assert.equal(native.ownerName, task.teamName); assert.equal(native.status, 'in_progress');
       if (!this.read.has(agent.id)) { this.read.add(agent.id); yield* response('read', { file_path: fixture }); return; }
       if (task.teamName === 'flash-a' && !task.guidance) {
-        yield* response('mentor_report', { task_id: task.taskId, status: 'blocked', summary: 'Need contract interpretation', evidence: 'AC1 was read from the fixture', attempts: 'Inspected fixture; have not guessed the required behavior', question: 'Does AC1 require rejecting invalid input?' }); return;
+        yield* response('mentor_report', { task_id: task.taskId, status: 'blocked', summary: 'Need contract interpretation', evidence: 'AC1 was read from the fixture', attempts: 'Inspected fixture; have not guessed the required behavior', question: '问'.repeat(32000) }); return;
       }
+      if (task.teamName === 'flash-a') assert.equal(task.guidance.fallback.length, 32000, 'Native Team child receives the full tutor message');
       yield* response('mentor_report', { task_id: task.taskId, status: 'ready-review', summary: task.guidance ? 'Contract inspection corrected after guidance' : 'Contract inspected; awaiting independent review', evidence: 'Read the contract fixture; no source edits', changes: [], checks: ['Read contract fixture AC1 and AC2'], criteria: [{ id: 'AC1', status: 'PASS', evidence: 'Fixture contract requires rejecting invalid parser input', scope: 'Contract inspection only; no implementation tested' }, { id: 'AC2', status: 'PASS', evidence: 'Audit only, no source edits', scope: 'Owned fixture reads and native task controls only' }], risks: [] }); return;
     }
     assert.equal(options.provider, 'openai-codex'); assert.equal(options.model, 'gpt-6.1-sol');
@@ -78,7 +79,7 @@ class TeamAdapter extends LlmAdapter {
     this.releaseStaffing();
     if (!this.rosterRead) { this.rosterRead = true; yield* response('list_agents', {}); return; }
     const blocked = state.tasks.find(task => task.status === 'blocked');
-    if (blocked) { yield* response('mentor_guide', { task_id: blocked.taskId, purpose: 'task-guidance', diagnosis: 'Hypothesis: AC1 states the invalid-input contract', next_steps: 'Use the fixture AC1 text; do not implement or edit source', validation: 'AC1 explicitly says reject invalid parser input', fallback: 'Report any contradictory source instead of guessing' }); return; }
+    if (blocked) { assert.equal(blocked.report.question.length, 32000); yield* response('mentor_guide', { task_id: blocked.taskId, purpose: 'task-guidance', diagnosis: 'Hypothesis: AC1 states the invalid-input contract', next_steps: 'Use the fixture AC1 text; do not implement or edit source', validation: 'AC1 explicitly says reject invalid parser input', fallback: '退'.repeat(32000) }); return; }
     const correction = state.tasks.find(task => task.teamName === 'flash-b' && task.status === 'ready-review' && !task.guidance);
     if (correction) { assert.equal(this.ctx.agentTeams.getTask(agent, correction.teamTaskId).status, 'completed'); yield* response('mentor_guide', { task_id: correction.taskId, purpose: 'report-correction', diagnosis: 'State inspection scope more explicitly', next_steps: 'Reclaim the reopened native task and submit a corrected report', validation: 'Report distinguishes contract inspection from implementation testing', fallback: 'Report blocked if the native task cannot be claimed' }); return; }
     const stopped = state.tasks.find(task => task.status === 'stopped');
@@ -104,7 +105,7 @@ async function kernel(tempRoot) {
     const mod = await import('@deepseek-ai/' + name);
     await ctx.plugin(mod.default ?? mod, name === 'dsh-agent-preset-registry' ? { default: 'standard' } : {});
   }
-  for (const [name, config] of [['dsh-session-persistence-jsonl', { root: tempRoot, compression: 'none' }], ['dsh-session-query-sqlite', { path: ':memory:', openAt: 'never' }], ['dsh-experimental-agent-team', {}], ['dsh-experimental-tool-agent-team', {}]]) {
+  for (const [name, config] of [['dsh-session-persistence-jsonl', { root: tempRoot, compression: 'none' }], ['dsh-session-query-sqlite', { path: ':memory:', openAt: 'never' }], ['dsh-experimental-agent-team', { maxMessageBytes: 1048576 }], ['dsh-experimental-tool-agent-team', {}]]) {
     const mod = await import('@deepseek-ai/' + name); await ctx.plugin(mod.default ?? mod, config);
   }
   await ctx.plugin(mentor, { maxConcurrentWorkers: 1 });

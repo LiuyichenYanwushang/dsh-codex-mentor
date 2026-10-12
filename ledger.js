@@ -3,6 +3,8 @@ import { fileReference, materialEntries, materialSummary } from './materials.js?
 export const KEY = 'codexMentor';
 export const PRESET = 'codex-mentor';
 export const PREFIX = 'CODEX_MENTOR/1\n';
+export const COMMUNICATION_TEXT_LIMIT = 32000;
+export const PROTOCOL_MESSAGE_LIMIT = 256000; // Room for multiple 32k fields and JSON escaping; still bounded.
 export const MUTATIONS = ['mentor_begin', 'mentor_verify', 'mentor_delegate', 'mentor_report', 'mentor_guide', 'mentor_resume', 'mentor_review', 'mentor_memory', 'mentor_materials'];
 export const DIRECT_QUESTION_ID = 'codex-mentor-direct';
 export const DIRECT_LABEL = '本次直接执行';
@@ -39,7 +41,7 @@ export function initial(header, inheritedEventCount = 0) {
 }
 export function encode(record) {
   const json = JSON.stringify({ version: 1, ...record });
-  if (json.length > 24000) reject('MESSAGE_TOO_LARGE', 'This protocol message exceeds the 24000-character receive limit', 'Shorten the assignment/report to its bounded criteria and source references', { field: record.kind, max_characters: 24000 });
+  if (json.length > PROTOCOL_MESSAGE_LIMIT) reject('MESSAGE_TOO_LARGE', `This protocol message exceeds the ${PROTOCOL_MESSAGE_LIMIT}-character receive limit`, 'Shorten the structured message to bounded criteria and source references', { field: record.kind, max_characters: PROTOCOL_MESSAGE_LIMIT });
   return PREFIX + json;
 }
 function decode(content) {
@@ -48,7 +50,7 @@ function decode(content) {
     const index = block.text.indexOf(PREFIX);
     if (index < 0 || (index > 0 && block.text[index - 1] !== '\n')) continue;
     const raw = block.text.slice(index + PREFIX.length).split('\n')[0];
-    if (raw.length > 24000) return null;
+    if (raw.length > PROTOCOL_MESSAGE_LIMIT) return null;
     try {
       const value = JSON.parse(raw);
       if (value.version !== 1) return null;
@@ -56,8 +58,8 @@ function decode(content) {
       switch (value.kind) {
         case 'report':
           choice(value.status, 'status', ['progress', 'blocked', 'ready-review']);
-          text(value.summary, 'summary', 2000); text(value.evidence, 'evidence');
-          if (value.status === 'blocked') { text(value.attempts, 'attempts', 2000); text(value.question, 'question', 1000); }
+          text(value.summary, 'summary', COMMUNICATION_TEXT_LIMIT); text(value.evidence, 'evidence', COMMUNICATION_TEXT_LIMIT);
+          if (value.status === 'blocked') { text(value.attempts, 'attempts', COMMUNICATION_TEXT_LIMIT); text(value.question, 'question', COMMUNICATION_TEXT_LIMIT); }
           if (value.status === 'ready-review') {
             const gate = value.evidenceGate;
             if (!gate || !reportCriteria(gate.criteria).length) return null;
@@ -65,10 +67,10 @@ function decode(content) {
           }
           break;
         case 'guidance':
-          text(value.diagnosis, 'diagnosis', 2000); text(value.nextSteps, 'nextSteps'); text(value.validation, 'validation', 2000); text(value.fallback, 'fallback', 1000);
+          for (const field of ['diagnosis', 'nextSteps', 'validation', 'fallback']) text(value[field], field, COMMUNICATION_TEXT_LIMIT);
           break;
         case 'review':
-          choice(value.verdict, 'verdict', ['accepted', 'rework', 'cancelled', 'closed-unaccepted']); text(value.evidence, 'evidence');
+          choice(value.verdict, 'verdict', ['accepted', 'rework', 'cancelled', 'closed-unaccepted']); text(value.evidence, 'evidence', COMMUNICATION_TEXT_LIMIT);
           break;
         case 'assignment':
           if (value.materials !== undefined) materialEntries(value.materials);

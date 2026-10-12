@@ -19,6 +19,14 @@ DSH 0.2.0-rc.2 的独立模式 bundle。非 OpenAI/DeepSeek 官方产品；提�
 
 Flash 默认自动选择已配置且目录中包含 `deepseek-flash`（显示名 DeepSeek-V41-Flash）的 `deepseek-account`，其次 `deepseek-official`。选择发生在派工前，实际路由写入子会话描述和任务记录；推理失败不会自动换成 GPT，也不会切换账户。其他 provider 可以通过 `codex-mentor-host` 配置显式指定。缺凭据时在 Settings → Models 配置；目录可用不是推理成功的证明。
 
+## 0.11.3：通讯文本放宽至32k
+
+- `mentor_message.text`、`mentor_report` 的 summary/evidence/attempts/question、`mentor_guide` 的 diagnosis/next_steps/validation/fallback、`mentor_resume.message` 和 `mentor_review.evidence` 均支持单字段32,000字符；按现有 JavaScript string length 计数，不是 tokens 或字节。讨论班发言/记忆/任务契约的独立边界不被顺带扩大。
+- 发送与接收使用同一个32k上限；整体 JSON 协议上限从24,000增至256,000字符，为多字段与转义留出空间，仍有总量边界。长附言不会被恢复提示额外占用容量：系统恢复提醒在 diagnosis 中，nextSteps 保留附言原文。超限显式拒绝，点对点超限拒绝不消耗话题预算，不截断伪称成功。
+- 通过现有 `agent-team.maxMessageBytes` 配置将 profile 的原生 Team 单包上限64 KiB→1 MiB，覆盖中文 UTF-8、多个32k字段与发送者包装，不改 SDK。原生日志投递、权限/模型固定、验收规则、每话题8次尝试和默认关闭的多余界面不变；projection stateVersion 10 从原生历史重新计算，不改日志或迁移长期数据。
+
+- 140/140 回归通过、0 skipped、不调用外部推理：32k中文的实际普通 subagent/Team 报告与指导、点对点投递、原子会话冷恢复附言、32001拒绝、回放与旧验收保留。首轮工具描述同面原生启发式对照：Leader +27、worker +12 tokens；仅还原改动参数的旧描述，不是完整旧版本或外部计费。
+
 ## 0.11.2：节点式记忆记录，直接进入 subagent system prompt
 
 - 提醒导师和成员在重要发现、失败方法/根因、决策及审查反馈后及时记录有复用价值的经验，尤其在压缩、交接、阻塞/提交前；先 search/read，再以 CAS revise 更新或纠正，避免重复笔记、逐读打卡、秘密和隐藏推理。没有新经验或记忆不可用时不编造记录、不阻止正常报告。

@@ -5,7 +5,7 @@ import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { openProjectMemory } from './project-memory.js?mentor=0.11.2';
 import { openDiscussions } from './discussions.js';
-import { PRESET, TERMINAL, currentAssignment, text, argsObject } from './ledger.js?mentor=0.11.0';
+import { PRESET, TERMINAL, currentAssignment, text, argsObject, COMMUNICATION_TEXT_LIMIT } from './ledger.js?mentor=0.11.3';
 
 export const COLLAB_PREFIX = 'MENTOR_COLLAB/1\n';
 export function isCollaborationMessage(message) {
@@ -117,7 +117,7 @@ export function createCollaboration(ctx, state) {
     if (!auth.native) throw new Error('Peer communication requires native Teams in this exact Leader session; ordinary siblings are not peers');
     const target = text(request.target, 'target', 80);
     if (target === auth.nativeName || !auth.roster.some(row => row.nativeName === target)) throw new Error('Select a different current native Team member');
-    const payload = { kind: request.kind ?? 'help', text: text(request.text, 'text', 2000), threadId: request.thread_id ? text(request.thread_id, 'thread_id', 100) : randomUUID(), replyTo: request.reply_to ? text(request.reply_to, 'reply_to', 100) : null, taskId: request.task_id ? text(request.task_id, 'task_id', 100) : null, author: auth.nativeName, memberId: auth.memberId };
+    const payload = { kind: request.kind ?? 'help', text: text(request.text, 'text', COMMUNICATION_TEXT_LIMIT), threadId: request.thread_id ? text(request.thread_id, 'thread_id', 100) : randomUUID(), replyTo: request.reply_to ? text(request.reply_to, 'reply_to', 100) : null, taskId: request.task_id ? text(request.task_id, 'task_id', 100) : null, author: auth.nativeName, memberId: auth.memberId };
     if (payload.threadId === '__proto__') throw new Error('Reserved thread_id; select a regular bounded topic ID');
     if (!['help', 'finding', 'question', 'review', 'reply'].includes(payload.kind)) throw new Error('Unknown peer message kind');
     const threads = state(auth.root).peerThreads ?? {};
